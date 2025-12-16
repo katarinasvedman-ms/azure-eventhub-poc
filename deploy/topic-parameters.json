@@ -1,0 +1,18 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "eventHubNamespaceName": {
+      "value": "eventhub-dev-fuwf32lf57ise"
+    },
+    "eventHubName": {
+      "value": "logs"
+    },
+    "partitionCount": {
+      "value": 24
+    },
+    "messageRetentionInDays": {
+      "value": 1
+    }
+  }
+}

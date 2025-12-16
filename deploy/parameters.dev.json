@@ -1,0 +1,24 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "location": {
+      "value": "swedencentral"
+    },
+    "environment": {
+      "value": "dev"
+    },
+    "eventHubName": {
+      "value": "logs"
+    },
+    "partitionCount": {
+      "value": 24
+    },
+    "messageRetentionInDays": {
+      "value": 1
+    },
+    "storageAccountSku": {
+      "value": "Standard_LRS"
+    }
+  }
+}

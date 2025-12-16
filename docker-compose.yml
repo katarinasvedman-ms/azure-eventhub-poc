@@ -1,0 +1,48 @@
+version: '3.8'
+
+services:
+  # Azure Cosmos DB Emulator (alternative to Blob Storage for local testing)
+  azure-storage-emulator:
+    image: mcr.microsoft.com/azure-storage/azurite:latest
+    ports:
+      - "10000:10000"  # Blob Storage
+      - "10001:10001"  # Queue Storage
+      - "10002:10002"  # Table Storage
+    environment:
+      AZURITE_ACCOUNTS: "devstoreaccount1:Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
+    volumes:
+      - ./azurite-data:/data
+
+  # API Application
+  api:
+    build:
+      context: ./src
+      dockerfile: Dockerfile
+    ports:
+      - "5000:5000"
+      - "5001:5001"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: "http://+:5000;https://+:5001"
+      EventHub__FullyQualifiedNamespace: ${EVENTHUB_NAMESPACE:-your-namespace.servicebus.windows.net}
+      EventHub__HubName: ${EVENTHUB_NAME:-logsysng-hub}
+      EventHub__StorageConnectionString: "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://azure-storage-emulator:10000/devstoreaccount1;"
+      EventHub__StorageContainerName: "event-hub-checkpoints"
+    depends_on:
+      - azure-storage-emulator
+    volumes:
+      - ./src:/app
+
+  # K6 Load Test Runner
+  load-test:
+    image: grafana/k6:latest
+    volumes:
+      - ./load-test.js:/scripts/load-test.js
+    environment:
+      BASE_URL: http://api:5000
+    command: run /scripts/load-test.js
+    depends_on:
+      - api
+
+volumes:
+  azurite-data:
