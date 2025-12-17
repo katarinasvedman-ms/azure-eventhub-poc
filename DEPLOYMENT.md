@@ -279,4 +279,4 @@ dotnet run -- --no-db
 
 *Version*: 2.0  
 *Last Updated*: December 17, 2025  
-*Status*: Production-Ready (Proven 26.7k evt/sec)
+*Status*: PoC Complete (Proven 26.7k evt/sec)

@@ -1,8 +1,8 @@
-# Event Hub PoC - Production Ready
+# Event Hub PoC
 
 ## Overview
 
-This is a **production-ready proof of concept** demonstrating high-throughput Azure Event Hub patterns for event ingestion scenarios (20,000+ events/second). It proves the infrastructure can achieve 26.7k evt/sec with direct SDK batching and provides reusable best practices.
+This is a proof of concept demonstrating high-throughput Azure Event Hub patterns for event ingestion scenarios (20,000+ events/second). It proves the infrastructure can achieve 26.7k evt/sec with direct SDK batching and provides reusable best practices.
 
 ## Key Findings
 
@@ -218,7 +218,7 @@ Creates:
 ---
 
 **Project**: Event Hub PoC  
-**Status**: Production Ready  
+**Status**: PoC Complete  
 **Version**: 2.0 (Cleaned & Optimized)  
 **Performance**: 26.7k evt/sec proven  
 **Last Updated**: December 17, 2025
