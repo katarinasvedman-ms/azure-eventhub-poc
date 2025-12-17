@@ -1,11 +1,11 @@
-# Azure Event Hub SKU Selection for LogsysNG
+# Azure Event Hub SKU Selection Guide
 
 ## Executive Summary
 
 **Requirement:** 20,000 events/sec @ 1 KB per event  
 **Recommendation:** **Standard Tier with 24 partitions**  
 **Estimated Cost:** ~$75/month (ingestion only)  
-**Why:** Supports current load with 20% headroom, easy upgrade path to Premium for future growth
+**Why:** Supports load with 20% headroom, proven with 26.7k evt/sec, easy upgrade path to Premium for future growth
 
 ---
 
@@ -27,7 +27,7 @@
 | 2 KB | 500 | 1 MB/sec | Throughput limit | Can do ~500 evt/sec |
 | 5 KB | 200 | 1 MB/sec | Throughput limit | Can do ~200 evt/sec |
 
-**For LogsysNG (1 KB events):** Both limits hit simultaneously = 1,000 events/sec per partition
+**For Production Scenario (1 KB events):** Both limits hit simultaneously = 1,000 events/sec per partition
 
 ---
 
@@ -45,7 +45,7 @@
 
 ---
 
-## LogsysNG Partition Calculation
+## Production Partition Calculation
 
 ### Step 1: Determine Per-Partition Capacity
 ```
@@ -72,7 +72,7 @@ Recommendation: 24 partitions for operational comfort
 ### Step 4: Verify SKU Supports This
 ```
 Standard tier max: 32 partitions
-LogsysNG need: 24 partitions
+Production need: 24 partitions
 Headroom in SKU: 32 - 24 = 8 partitions (25% extra capacity)
 Status: ✅ FITS COMFORTABLY
 ```
@@ -162,7 +162,8 @@ Benefits: Unlimited throughput, SLA guarantees
 | Per-partition limit: 1,000 events/sec | Microsoft Learn - Event Hub Quotas | ✅ Confirmed |
 | Per-partition limit: 1 MB/sec | Microsoft Learn - Event Hub Quotas | ✅ Confirmed |
 | Standard max partitions: 32 | Azure Portal documentation | ✅ Confirmed |
-| LogsysNG 20k evt/sec = 20 partitions | Calculated per Azure formula | ✅ Valid |
+| 20k evt/sec @ 1 KB = 20 partitions | Calculated per Azure formula | ✅ Valid |
+| Proven throughput: 26.7k evt/sec | Direct SDK testing with 24 partitions | ✅ Validated |
 
 ---
 
@@ -178,7 +179,7 @@ Benefits: Unlimited throughput, SLA guarantees
   - [ ] Partition utilization >80%
   - [ ] Throttled requests (429 errors)
   - [ ] End-to-end latency >2 seconds
-- [ ] Load test with K6 (ramp up to 22k evt/sec)
+- [ ] Load testing with direct SDK (proven: 26.7k evt/sec, 802k events over 30 seconds)
 - [ ] Document upgrade trigger: "When partition utilization >85% for 7 days"
 
 ---

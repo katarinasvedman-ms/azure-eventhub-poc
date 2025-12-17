@@ -1,10 +1,10 @@
-using LogsysNgPoC.Models;
+using MetricSysPoC.Models;
 using Azure.Messaging.EventHubs;
 using Azure.Messaging.EventHubs.Producer;
 using Microsoft.Extensions.Logging;
 using System.Text.Json;
 
-namespace LogsysNgPoC.Services;
+namespace MetricSysPoC.Services;
 
 public interface IEventHubProducerService
 {

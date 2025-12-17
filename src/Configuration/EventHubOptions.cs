@@ -1,4 +1,4 @@
-namespace LogsysNgPoC.Configuration;
+namespace MetricSysPoC.Configuration;
 
 public class EventHubOptions
 {

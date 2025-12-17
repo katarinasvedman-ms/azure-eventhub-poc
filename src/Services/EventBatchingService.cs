@@ -1,7 +1,7 @@
-using LogsysNgPoC.Models;
+using MetricSysPoC.Models;
 using System.Collections.Concurrent;
 
-namespace LogsysNgPoC.Services;
+namespace MetricSysPoC.Services;
 
 public interface IEventBatchingService
 {
@@ -27,8 +27,8 @@ public class EventBatchingService : IEventBatchingService, IDisposable
 
     public EventBatchingService()
     {
-        _batchSize = 100;
-        _batchTimeoutMs = 1000;
+        _batchSize = 500;
+        _batchTimeoutMs = 100;
         _batchTimer = new Timer(CheckAndFlushBatch, null, TimeSpan.FromMilliseconds(_batchTimeoutMs), TimeSpan.FromMilliseconds(_batchTimeoutMs));
     }
 

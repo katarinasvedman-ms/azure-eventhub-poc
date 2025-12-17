@@ -27,7 +27,7 @@ cd deploy
 Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process
 
 # Run deployment
-.\deploy.ps1 -ResourceGroupName "rg-logsysng-dev" -Location "eastus"
+.\deploy.ps1 -ResourceGroupName "rg-eventhub-dev" -Location "eastus"
 ```
 
 ### Linux/Mac (Bash)
@@ -39,18 +39,18 @@ cd deploy
 chmod +x deploy.sh
 
 # Run deployment
-./deploy.sh -g "rg-logsysng-dev" -l "eastus" -e "dev"
+./deploy.sh -g "rg-eventhub-dev" -l "eastus" -e "dev"
 ```
 
 ### Manual Azure CLI
 
 ```powershell
 # Create resource group
-az group create --name "rg-logsysng-dev" --location "eastus"
+az group create --name "rg-eventhub-dev" --location "eastus"
 
 # Deploy template
 az deployment group create `
-  --resource-group "rg-logsysng-dev" `
+  --resource-group "rg-eventhub-dev" `
   --template-file main.bicep `
   --parameters parameters.dev.json `
   --parameters environment=dev
@@ -64,7 +64,7 @@ If you deployed manually:
 
 ```powershell
 az deployment group show `
-  --resource-group "rg-logsysng-dev" `
+  --resource-group "rg-eventhub-dev" `
   --name "main" `
   --query "properties.outputs" `
   --output json
@@ -112,34 +112,34 @@ https://portal.azure.com → Search for your resource group
 ### Azure CLI
 ```powershell
 # Get resource group
-az group show --name "rg-logsysng-dev" --output table
+az group show --name "rg-eventhub-dev" --output table
 
 # List resources
-az resource list --resource-group "rg-logsysng-dev" --output table
+az resource list --resource-group "rg-eventhub-dev" --output table
 
 # Get Event Hub details
 az eventhubs namespace show `
   --name "eventhub-dev-xxx" `
-  --resource-group "rg-logsysng-dev" `
+  --resource-group "rg-eventhub-dev" `
   --output table
 ```
 
 ### View Logs (Application Insights if configured)
 ```powershell
 # Check if Application Insights is available
-az resource list --resource-group "rg-logsysng-dev" --output table
+az resource list --resource-group "rg-eventhub-dev" --output table
 ```
 
 ## 7️⃣ Cleanup
 
 ```powershell
 # Delete entire resource group (removes ALL resources)
-az group delete --name "rg-logsysng-dev" --yes --no-wait
+az group delete --name "rg-eventhub-dev" --yes --no-wait
 
 # Or keep storage for compliance/archival
 az eventhubs namespace delete `
   --name "eventhub-dev-xxx" `
-  --resource-group "rg-logsysng-dev"
+  --resource-group "rg-eventhub-dev"
 ```
 
 ---
@@ -177,15 +177,6 @@ az eventhubs namespace delete `
 | **Authorization Policies** | SendPolicy (producer), ListenPolicy (consumer) |
 
 **Total Cost:** ~$75-100/month
-
----
-
-## Next: Load Testing
-
-```bash
-cd load-test
-k6 run load-test.js --vus 100 --duration 30s
-```
 
 ---
 

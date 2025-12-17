@@ -1,4 +1,4 @@
-namespace LogsysNgPoC.Models;
+namespace MetricSysPoC.Models;
 
 /// <summary>
 /// Represents a log event to be sent to Event Hub.
