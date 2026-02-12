@@ -1,12 +1,16 @@
 // Azure SQL Server and Database for Event Hub PoC
 // Uses Azure AD-only authentication to comply with security policies
 
-param location string = 'swedencentral'
-param environmentName string = 'dev'
+param location string = resourceGroup().location
 param serverNameSuffix string = uniqueString(resourceGroup().id)
+param databaseName string = 'eventhub-logs-db'
+
+// AAD admin — pass from parent or parameters file
+param aadAdminLogin string
+param aadAdminSid string
+param aadAdminTenantId string = subscription().tenantId
 
 var sqlServerName = 'sqlserver-logsysng-${serverNameSuffix}'
-var databaseName = 'eventhub-logs-db'
 
 resource sqlServer 'Microsoft.Sql/servers@2021-11-01' = {
   name: sqlServerName
@@ -18,9 +22,9 @@ resource sqlServer 'Microsoft.Sql/servers@2021-11-01' = {
     administrators: {
       administratorType: 'ActiveDirectory'
       azureADOnlyAuthentication: true
-      login: 'kapeltol_microsoft.com#EXT#@fdpo.onmicrosoft.com'
-      tenantId: subscription().tenantId
-      sid: '7305afcc-e26e-486f-bb5b-fc910fade69a'
+      login: aadAdminLogin
+      tenantId: aadAdminTenantId
+      sid: aadAdminSid
       principalType: 'User'
     }
   }
@@ -42,13 +46,13 @@ resource database 'Microsoft.Sql/servers/databases@2021-11-01' = {
   name: databaseName
   location: location
   sku: {
-    name: 'Basic'
-    tier: 'Basic'
-    capacity: 5
+    name: 'S2'
+    tier: 'Standard'
+    capacity: 50
   }
   properties: {
     collation: 'SQL_Latin1_General_CP1_CI_AS'
-    maxSizeBytes: 1073741824 // 1 GB
+    maxSizeBytes: 268435456000 // 250 GB
   }
 }
 
@@ -56,4 +60,5 @@ resource database 'Microsoft.Sql/servers/databases@2021-11-01' = {
 output sqlServerName string = sqlServer.name
 output databaseName string = database.name
 output fullyQualifiedDomainName string = sqlServer.properties.fullyQualifiedDomainName
-output connectionString string = 'Server=tcp:${sqlServer.properties.fullyQualifiedDomainName},1433;Initial Catalog=${databaseName};Persist Security Info=False;User ID=your-user@yourdomain.com;Encrypt=True;TrustServerCertificate=False;Connection Timeout=30;Authentication=Active Directory Integrated;'
+// AAD-only connection string (no password — managed identity acquires token at runtime)
+output connectionString string = 'Server=tcp:${sqlServer.properties.fullyQualifiedDomainName},1433;Initial Catalog=${databaseName};Encrypt=True;TrustServerCertificate=False;Connection Timeout=30;'

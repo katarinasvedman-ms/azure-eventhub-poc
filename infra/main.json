@@ -1,0 +1,796 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.39.26.7824",
+      "templateHash": "15105227615500708552"
+    }
+  },
+  "parameters": {
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]"
+    },
+    "environment": {
+      "type": "string",
+      "defaultValue": "dev"
+    },
+    "eventHubName": {
+      "type": "string",
+      "defaultValue": "logs"
+    },
+    "partitionCount": {
+      "type": "int",
+      "defaultValue": 24
+    },
+    "messageRetentionInDays": {
+      "type": "int",
+      "defaultValue": 1
+    },
+    "storageAccountSku": {
+      "type": "string",
+      "defaultValue": "Standard_LRS"
+    },
+    "aadAdminLogin": {
+      "type": "string"
+    },
+    "aadAdminSid": {
+      "type": "string"
+    }
+  },
+  "variables": {
+    "eventHubNamespaceName": "[format('eventhub-{0}-{1}', parameters('environment'), uniqueString(resourceGroup().id))]",
+    "storageAccountName": "[format('sablob{0}', uniqueString(resourceGroup().id))]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.EventHub/namespaces",
+      "apiVersion": "2021-11-01",
+      "name": "[variables('eventHubNamespaceName')]",
+      "location": "[parameters('location')]",
+      "sku": {
+        "name": "Standard",
+        "tier": "Standard",
+        "capacity": 1
+      },
+      "properties": {
+        "isAutoInflateEnabled": false,
+        "maximumThroughputUnits": 0,
+        "kafkaEnabled": false,
+        "zoneRedundant": false
+      }
+    },
+    {
+      "type": "Microsoft.EventHub/namespaces/eventhubs",
+      "apiVersion": "2021-11-01",
+      "name": "[format('{0}/{1}', variables('eventHubNamespaceName'), parameters('eventHubName'))]",
+      "properties": {
+        "messageRetentionInDays": "[parameters('messageRetentionInDays')]",
+        "partitionCount": "[parameters('partitionCount')]"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.EventHub/namespaces', variables('eventHubNamespaceName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.EventHub/namespaces/eventhubs/consumergroups",
+      "apiVersion": "2021-11-01",
+      "name": "[format('{0}/{1}/{2}', variables('eventHubNamespaceName'), parameters('eventHubName'), 'logs-consumer')]",
+      "properties": {
+        "userMetadata": "Consumer group for log event processing"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.EventHub/namespaces/eventhubs', variables('eventHubNamespaceName'), parameters('eventHubName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.EventHub/namespaces/eventhubs/consumergroups",
+      "apiVersion": "2021-11-01",
+      "name": "[format('{0}/{1}/{2}', variables('eventHubNamespaceName'), parameters('eventHubName'), 'monitoring-consumer')]",
+      "properties": {
+        "userMetadata": "Consumer group for monitoring and diagnostics"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.EventHub/namespaces/eventhubs', variables('eventHubNamespaceName'), parameters('eventHubName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.EventHub/namespaces/eventhubs/consumergroups",
+      "apiVersion": "2021-11-01",
+      "name": "[format('{0}/{1}/{2}', variables('eventHubNamespaceName'), parameters('eventHubName'), 'archive-consumer')]",
+      "properties": {
+        "userMetadata": "Consumer group for archival and backup"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.EventHub/namespaces/eventhubs', variables('eventHubNamespaceName'), parameters('eventHubName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.EventHub/namespaces/authorizationRules",
+      "apiVersion": "2021-11-01",
+      "name": "[format('{0}/{1}', variables('eventHubNamespaceName'), 'SendPolicy')]",
+      "properties": {
+        "rights": [
+          "Send"
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.EventHub/namespaces', variables('eventHubNamespaceName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.EventHub/namespaces/authorizationRules",
+      "apiVersion": "2021-11-01",
+      "name": "[format('{0}/{1}', variables('eventHubNamespaceName'), 'ListenPolicy')]",
+      "properties": {
+        "rights": [
+          "Listen"
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.EventHub/namespaces', variables('eventHubNamespaceName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Storage/storageAccounts",
+      "apiVersion": "2021-09-01",
+      "name": "[variables('storageAccountName')]",
+      "location": "[parameters('location')]",
+      "kind": "StorageV2",
+      "sku": {
+        "name": "[parameters('storageAccountSku')]"
+      },
+      "properties": {
+        "accessTier": "Hot",
+        "allowBlobPublicAccess": false,
+        "minimumTlsVersion": "TLS1_2",
+        "supportsHttpsTrafficOnly": true
+      }
+    },
+    {
+      "type": "Microsoft.Storage/storageAccounts/blobServices/containers",
+      "apiVersion": "2021-09-01",
+      "name": "[format('{0}/default/checkpoints', variables('storageAccountName'))]",
+      "properties": {
+        "publicAccess": "None"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Storage/storageAccounts', variables('storageAccountName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "sqlServer",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "aadAdminLogin": {
+            "value": "[parameters('aadAdminLogin')]"
+          },
+          "aadAdminSid": {
+            "value": "[parameters('aadAdminSid')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.39.26.7824",
+              "templateHash": "7029199475760996868"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string",
+              "defaultValue": "[resourceGroup().location]"
+            },
+            "serverNameSuffix": {
+              "type": "string",
+              "defaultValue": "[uniqueString(resourceGroup().id)]"
+            },
+            "databaseName": {
+              "type": "string",
+              "defaultValue": "eventhub-logs-db"
+            },
+            "aadAdminLogin": {
+              "type": "string"
+            },
+            "aadAdminSid": {
+              "type": "string"
+            },
+            "aadAdminTenantId": {
+              "type": "string",
+              "defaultValue": "[subscription().tenantId]"
+            }
+          },
+          "variables": {
+            "sqlServerName": "[format('sqlserver-logsysng-{0}', parameters('serverNameSuffix'))]"
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Sql/servers",
+              "apiVersion": "2021-11-01",
+              "name": "[variables('sqlServerName')]",
+              "location": "[parameters('location')]",
+              "properties": {
+                "version": "12.0",
+                "minimalTlsVersion": "1.2",
+                "publicNetworkAccess": "Enabled",
+                "administrators": {
+                  "administratorType": "ActiveDirectory",
+                  "azureADOnlyAuthentication": true,
+                  "login": "[parameters('aadAdminLogin')]",
+                  "tenantId": "[parameters('aadAdminTenantId')]",
+                  "sid": "[parameters('aadAdminSid')]",
+                  "principalType": "User"
+                }
+              }
+            },
+            {
+              "type": "Microsoft.Sql/servers/firewallRules",
+              "apiVersion": "2021-11-01",
+              "name": "[format('{0}/{1}', variables('sqlServerName'), 'AllowAzureServices')]",
+              "properties": {
+                "startIpAddress": "0.0.0.0",
+                "endIpAddress": "0.0.0.0"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Sql/servers', variables('sqlServerName'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Sql/servers/databases",
+              "apiVersion": "2021-11-01",
+              "name": "[format('{0}/{1}', variables('sqlServerName'), parameters('databaseName'))]",
+              "location": "[parameters('location')]",
+              "sku": {
+                "name": "S2",
+                "tier": "Standard",
+                "capacity": 50
+              },
+              "properties": {
+                "collation": "SQL_Latin1_General_CP1_CI_AS",
+                "maxSizeBytes": 268435456000
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Sql/servers', variables('sqlServerName'))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "sqlServerName": {
+              "type": "string",
+              "value": "[variables('sqlServerName')]"
+            },
+            "databaseName": {
+              "type": "string",
+              "value": "[parameters('databaseName')]"
+            },
+            "fullyQualifiedDomainName": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.Sql/servers', variables('sqlServerName')), '2021-11-01').fullyQualifiedDomainName]"
+            },
+            "connectionString": {
+              "type": "string",
+              "value": "[format('Server=tcp:{0},1433;Initial Catalog={1};Encrypt=True;TrustServerCertificate=False;Connection Timeout=30;', reference(resourceId('Microsoft.Sql/servers', variables('sqlServerName')), '2021-11-01').fullyQualifiedDomainName, parameters('databaseName'))]"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "functionApp",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "storageAccountName": {
+            "value": "[variables('storageAccountName')]"
+          },
+          "eventHubListenConnectionString": {
+            "value": "[listKeys(resourceId('Microsoft.EventHub/namespaces/authorizationRules', variables('eventHubNamespaceName'), 'ListenPolicy'), '2021-11-01').primaryConnectionString]"
+          },
+          "sqlConnectionString": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'sqlServer'), '2025-04-01').outputs.connectionString.value]"
+          },
+          "eventHubName": {
+            "value": "[parameters('eventHubName')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.39.26.7824",
+              "templateHash": "14942972950047033686"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string",
+              "defaultValue": "[resourceGroup().location]"
+            },
+            "appName": {
+              "type": "string",
+              "defaultValue": "[format('func-logsysng-{0}', uniqueString(resourceGroup().id))]"
+            },
+            "storageAccountName": {
+              "type": "string"
+            },
+            "eventHubListenConnectionString": {
+              "type": "string"
+            },
+            "sqlConnectionString": {
+              "type": "string"
+            },
+            "eventHubName": {
+              "type": "string",
+              "defaultValue": "logs"
+            },
+            "eventHubConsumerGroup": {
+              "type": "string",
+              "defaultValue": "logs-consumer"
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Insights/components",
+              "apiVersion": "2020-02-02",
+              "name": "[format('appi-logsysng-{0}', uniqueString(resourceGroup().id))]",
+              "location": "[parameters('location')]",
+              "kind": "web",
+              "properties": {
+                "Application_Type": "web",
+                "RetentionInDays": 30
+              }
+            },
+            {
+              "type": "Microsoft.Web/serverfarms",
+              "apiVersion": "2023-12-01",
+              "name": "[format('{0}-plan', parameters('appName'))]",
+              "location": "[parameters('location')]",
+              "kind": "functionapp",
+              "sku": {
+                "name": "FC1",
+                "tier": "FlexConsumption"
+              },
+              "properties": {
+                "reserved": true
+              }
+            },
+            {
+              "type": "Microsoft.Web/sites",
+              "apiVersion": "2023-12-01",
+              "name": "[parameters('appName')]",
+              "location": "[parameters('location')]",
+              "kind": "functionapp,linux",
+              "identity": {
+                "type": "SystemAssigned"
+              },
+              "properties": {
+                "serverFarmId": "[resourceId('Microsoft.Web/serverfarms', format('{0}-plan', parameters('appName')))]",
+                "httpsOnly": true,
+                "siteConfig": {
+                  "ftpsState": "Disabled",
+                  "minTlsVersion": "1.2",
+                  "appSettings": [
+                    {
+                      "name": "FUNCTIONS_EXTENSION_VERSION",
+                      "value": "~4"
+                    },
+                    {
+                      "name": "FUNCTIONS_WORKER_RUNTIME",
+                      "value": "dotnet-isolated"
+                    },
+                    {
+                      "name": "AzureWebJobsStorage",
+                      "value": "[format('DefaultEndpointsProtocol=https;AccountName={0};AccountKey={1};EndpointSuffix=core.windows.net', parameters('storageAccountName'), listKeys(resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName')), '2023-01-01').keys[0].value)]"
+                    },
+                    {
+                      "name": "CheckpointStoreConnection",
+                      "value": "[format('DefaultEndpointsProtocol=https;AccountName={0};AccountKey={1};EndpointSuffix=core.windows.net', parameters('storageAccountName'), listKeys(resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName')), '2023-01-01').keys[0].value)]"
+                    },
+                    {
+                      "name": "EventHubConnection",
+                      "value": "[parameters('eventHubListenConnectionString')]"
+                    },
+                    {
+                      "name": "EventHubName",
+                      "value": "[parameters('eventHubName')]"
+                    },
+                    {
+                      "name": "EventHubConsumerGroup",
+                      "value": "[parameters('eventHubConsumerGroup')]"
+                    },
+                    {
+                      "name": "SqlConnectionString",
+                      "value": "[parameters('sqlConnectionString')]"
+                    },
+                    {
+                      "name": "APPLICATIONINSIGHTS_CONNECTION_STRING",
+                      "value": "[reference(resourceId('Microsoft.Insights/components', format('appi-logsysng-{0}', uniqueString(resourceGroup().id))), '2020-02-02').ConnectionString]"
+                    },
+                    {
+                      "name": "ApplicationInsightsAgent_EXTENSION_VERSION",
+                      "value": "~3"
+                    }
+                  ]
+                },
+                "functionAppConfig": {
+                  "deployment": {
+                    "storage": {
+                      "type": "blobContainer",
+                      "value": "[format('{0}deployments', reference(resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName')), '2023-01-01').primaryEndpoints.blob)]",
+                      "authentication": {
+                        "type": "StorageAccountConnectionString",
+                        "storageAccountConnectionStringName": "AzureWebJobsStorage"
+                      }
+                    }
+                  },
+                  "runtime": {
+                    "name": "dotnet-isolated",
+                    "version": "8.0"
+                  },
+                  "scaleAndConcurrency": {
+                    "maximumInstanceCount": 100,
+                    "instanceMemoryMB": 2048
+                  }
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Insights/components', format('appi-logsysng-{0}', uniqueString(resourceGroup().id)))]",
+                "[resourceId('Microsoft.Web/serverfarms', format('{0}-plan', parameters('appName')))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Storage/storageAccounts/blobServices/containers",
+              "apiVersion": "2023-01-01",
+              "name": "[format('{0}/default/deployments', parameters('storageAccountName'))]",
+              "properties": {
+                "publicAccess": "None"
+              }
+            }
+          ],
+          "outputs": {
+            "functionAppName": {
+              "type": "string",
+              "value": "[parameters('appName')]"
+            },
+            "functionAppDefaultHostName": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.Web/sites', parameters('appName')), '2023-12-01').defaultHostName]"
+            },
+            "identityPrincipalId": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.Web/sites', parameters('appName')), '2023-12-01', 'full').identity.principalId]"
+            },
+            "identityTenantId": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.Web/sites', parameters('appName')), '2023-12-01', 'full').identity.tenantId]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.EventHub/namespaces', variables('eventHubNamespaceName'))]",
+        "[resourceId('Microsoft.Resources/deployments', 'sqlServer')]",
+        "[resourceId('Microsoft.Storage/storageAccounts', variables('storageAccountName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "apiApp",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "eventHubNamespaceFqdn": {
+            "value": "[format('{0}.servicebus.windows.net', variables('eventHubNamespaceName'))]"
+          },
+          "eventHubName": {
+            "value": "[parameters('eventHubName')]"
+          },
+          "eventHubNamespaceId": {
+            "value": "[resourceId('Microsoft.EventHub/namespaces', variables('eventHubNamespaceName'))]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.39.26.7824",
+              "templateHash": "12954831997559559545"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string",
+              "defaultValue": "[resourceGroup().location]"
+            },
+            "appName": {
+              "type": "string",
+              "defaultValue": "[format('api-logsysng-{0}', uniqueString(resourceGroup().id))]"
+            },
+            "eventHubNamespaceFqdn": {
+              "type": "string"
+            },
+            "eventHubName": {
+              "type": "string",
+              "defaultValue": "logs"
+            },
+            "appInsightsConnectionString": {
+              "type": "string",
+              "defaultValue": ""
+            },
+            "eventHubNamespaceId": {
+              "type": "string"
+            }
+          },
+          "variables": {
+            "eventHubsDataSenderRoleId": "2b629674-e913-4c01-ae53-ef4638d8f975"
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Web/serverfarms",
+              "apiVersion": "2023-12-01",
+              "name": "[format('{0}-plan', parameters('appName'))]",
+              "location": "[parameters('location')]",
+              "kind": "linux",
+              "sku": {
+                "name": "P1v3",
+                "tier": "PremiumV3",
+                "capacity": 1
+              },
+              "properties": {
+                "reserved": true
+              }
+            },
+            {
+              "type": "Microsoft.Web/sites",
+              "apiVersion": "2023-12-01",
+              "name": "[parameters('appName')]",
+              "location": "[parameters('location')]",
+              "kind": "app,linux",
+              "identity": {
+                "type": "SystemAssigned"
+              },
+              "properties": {
+                "serverFarmId": "[resourceId('Microsoft.Web/serverfarms', format('{0}-plan', parameters('appName')))]",
+                "httpsOnly": true,
+                "siteConfig": {
+                  "linuxFxVersion": "DOTNETCORE|8.0",
+                  "ftpsState": "Disabled",
+                  "minTlsVersion": "1.2",
+                  "alwaysOn": true,
+                  "http20Enabled": true,
+                  "appSettings": [
+                    {
+                      "name": "EventHub__FullyQualifiedNamespace",
+                      "value": "[parameters('eventHubNamespaceFqdn')]"
+                    },
+                    {
+                      "name": "EventHub__HubName",
+                      "value": "[parameters('eventHubName')]"
+                    },
+                    {
+                      "name": "EventHub__UseKeyAuthentication",
+                      "value": "false"
+                    },
+                    {
+                      "name": "ASPNETCORE_ENVIRONMENT",
+                      "value": "Production"
+                    },
+                    {
+                      "name": "APPLICATIONINSIGHTS_CONNECTION_STRING",
+                      "value": "[parameters('appInsightsConnectionString')]"
+                    }
+                  ]
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Web/serverfarms', format('{0}-plan', parameters('appName')))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Insights/autoscalesettings",
+              "apiVersion": "2022-10-01",
+              "name": "[format('{0}-autoscale', parameters('appName'))]",
+              "location": "[parameters('location')]",
+              "properties": {
+                "enabled": true,
+                "targetResourceUri": "[resourceId('Microsoft.Web/serverfarms', format('{0}-plan', parameters('appName')))]",
+                "profiles": [
+                  {
+                    "name": "CPU-based scaling",
+                    "capacity": {
+                      "minimum": "1",
+                      "maximum": "5",
+                      "default": "1"
+                    },
+                    "rules": [
+                      {
+                        "metricTrigger": {
+                          "metricName": "CpuPercentage",
+                          "metricResourceUri": "[resourceId('Microsoft.Web/serverfarms', format('{0}-plan', parameters('appName')))]",
+                          "timeGrain": "PT1M",
+                          "statistic": "Average",
+                          "timeWindow": "PT5M",
+                          "timeAggregation": "Average",
+                          "operator": "GreaterThan",
+                          "threshold": 70
+                        },
+                        "scaleAction": {
+                          "direction": "Increase",
+                          "type": "ChangeCount",
+                          "value": "1",
+                          "cooldown": "PT5M"
+                        }
+                      },
+                      {
+                        "metricTrigger": {
+                          "metricName": "CpuPercentage",
+                          "metricResourceUri": "[resourceId('Microsoft.Web/serverfarms', format('{0}-plan', parameters('appName')))]",
+                          "timeGrain": "PT1M",
+                          "statistic": "Average",
+                          "timeWindow": "PT10M",
+                          "timeAggregation": "Average",
+                          "operator": "LessThan",
+                          "threshold": 30
+                        },
+                        "scaleAction": {
+                          "direction": "Decrease",
+                          "type": "ChangeCount",
+                          "value": "1",
+                          "cooldown": "PT10M"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Web/serverfarms', format('{0}-plan', parameters('appName')))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "name": "[guid(parameters('eventHubNamespaceId'), resourceId('Microsoft.Web/sites', parameters('appName')), variables('eventHubsDataSenderRoleId'))]",
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('eventHubsDataSenderRoleId'))]",
+                "principalId": "[reference(resourceId('Microsoft.Web/sites', parameters('appName')), '2023-12-01', 'full').identity.principalId]",
+                "principalType": "ServicePrincipal"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Web/sites', parameters('appName'))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "webAppName": {
+              "type": "string",
+              "value": "[parameters('appName')]"
+            },
+            "webAppDefaultHostName": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.Web/sites', parameters('appName')), '2023-12-01').defaultHostName]"
+            },
+            "identityPrincipalId": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.Web/sites', parameters('appName')), '2023-12-01', 'full').identity.principalId]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.EventHub/namespaces', variables('eventHubNamespaceName'))]"
+      ]
+    }
+  ],
+  "outputs": {
+    "eventHubNamespaceName": {
+      "type": "string",
+      "value": "[variables('eventHubNamespaceName')]"
+    },
+    "eventHubName": {
+      "type": "string",
+      "value": "[parameters('eventHubName')]"
+    },
+    "eventHubNamespaceId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.EventHub/namespaces', variables('eventHubNamespaceName'))]"
+    },
+    "eventHubId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.EventHub/namespaces/eventhubs', variables('eventHubNamespaceName'), parameters('eventHubName'))]"
+    },
+    "partitionCount": {
+      "type": "int",
+      "value": "[parameters('partitionCount')]"
+    },
+    "storageAccountName": {
+      "type": "string",
+      "value": "[variables('storageAccountName')]"
+    },
+    "storageAccountConnectionString": {
+      "type": "string",
+      "value": "[format('DefaultEndpointsProtocol=https;AccountName={0};AccountKey={1};EndpointSuffix=core.windows.net', variables('storageAccountName'), listKeys(resourceId('Microsoft.Storage/storageAccounts', variables('storageAccountName')), '2021-09-01').keys[0].value)]"
+    },
+    "sendPolicyConnectionString": {
+      "type": "string",
+      "value": "[listKeys(resourceId('Microsoft.EventHub/namespaces/authorizationRules', variables('eventHubNamespaceName'), 'SendPolicy'), '2021-11-01').primaryConnectionString]"
+    },
+    "listenPolicyConnectionString": {
+      "type": "string",
+      "value": "[listKeys(resourceId('Microsoft.EventHub/namespaces/authorizationRules', variables('eventHubNamespaceName'), 'ListenPolicy'), '2021-11-01').primaryConnectionString]"
+    },
+    "sqlServerName": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Resources/deployments', 'sqlServer'), '2025-04-01').outputs.sqlServerName.value]"
+    },
+    "sqlServerFqdn": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Resources/deployments', 'sqlServer'), '2025-04-01').outputs.fullyQualifiedDomainName.value]"
+    },
+    "sqlDatabaseName": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Resources/deployments', 'sqlServer'), '2025-04-01').outputs.databaseName.value]"
+    },
+    "sqlConnectionString": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Resources/deployments', 'sqlServer'), '2025-04-01').outputs.connectionString.value]"
+    },
+    "functionAppName": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Resources/deployments', 'functionApp'), '2025-04-01').outputs.functionAppName.value]"
+    },
+    "functionAppDefaultHostName": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Resources/deployments', 'functionApp'), '2025-04-01').outputs.functionAppDefaultHostName.value]"
+    },
+    "functionAppIdentityPrincipalId": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Resources/deployments', 'functionApp'), '2025-04-01').outputs.identityPrincipalId.value]"
+    },
+    "apiAppName": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Resources/deployments', 'apiApp'), '2025-04-01').outputs.webAppName.value]"
+    },
+    "apiAppDefaultHostName": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Resources/deployments', 'apiApp'), '2025-04-01').outputs.webAppDefaultHostName.value]"
+    },
+    "apiAppIdentityPrincipalId": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Resources/deployments', 'apiApp'), '2025-04-01').outputs.identityPrincipalId.value]"
+    }
+  }
+}

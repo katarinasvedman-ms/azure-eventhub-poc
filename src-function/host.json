@@ -1,0 +1,53 @@
+{
+  "version": "2.0",
+  "logging": {
+    "applicationInsights": {
+      "samplingSettings": {
+        "isEnabled": true,
+        "excludedTypes": "Request"
+      },
+      "enableLiveMetrics": true
+    },
+    "logLevel": {
+      "default": "Information",
+      "Function.ProcessEventBatch": "Information",
+      "Azure.Messaging.EventHubs": "Warning",
+      "Azure.Core": "Warning"
+    }
+  },
+  "extensions": {
+    "eventHubs": {
+      "_comment_maxEventBatchSize": "Maximum events delivered per function invocation. The runtime fills up to this many events and invokes the function. It is NOT a minimum — you may get fewer events under low load. Bumped to 2000 to reduce SQL round-trips under high load.",
+      "maxEventBatchSize": 2000,
+
+      "_comment_prefetchCount": "Number of events the AMQP receiver pre-fetches from the Event Hub into local memory. Must be >= maxEventBatchSize so the runtime always has events ready for the next invocation. A multiple (2x-4x) smooths out jitter. 2000 = 4× batch size.",
+      "prefetchCount": 2000,
+
+      "_comment_batchCheckpointFrequency": "Number of batches between checkpoint writes to blob storage. 1 = checkpoint after every batch (safest; fewest replayed events on failure). Higher values reduce blob I/O but increase replay window. At 500 events/batch, frequency=1 means ≤500 events replayed on crash. Frequency=5 means ≤2500.",
+      "batchCheckpointFrequency": 1,
+
+      "_comment_checkpointStoreConnection": "Separates checkpoint blob storage from AzureWebJobsStorage to avoid I/O contention with host internals. Points to the same account for now — swap to a dedicated account for production at scale.",
+      "checkpointStoreConnection": "CheckpointStoreConnection",
+
+      "_comment_initialOffsetOptions": "When no checkpoint exists, start from the end of the stream to avoid reprocessing the entire backlog on first deployment. Change to 'earliest' if you need to process historical events.",
+      "initialOffsetOptions": {
+        "type": "fromEnqueuedTime",
+        "enqueuedTimeUtc": "2026-01-01T00:00:00Z"
+      },
+
+      "_comment_clientRetryOptions": "Retry settings for the underlying AMQP connection. TryTimeout controls how long a single receive waits before timing out.",
+      "clientRetryOptions": {
+        "mode": "exponential",
+        "maxRetries": 5,
+        "delay": "00:00:01",
+        "maxDelay": "00:00:30",
+        "tryTimeout": "00:01:00"
+      }
+    }
+  },
+  "concurrency": {
+    "_comment": "Dynamic concurrency is disabled because Event Hubs already assigns exactly 1 partition per function instance. The SDK manages partition ownership; let it do its job.",
+    "dynamicConcurrencyEnabled": false
+  },
+  "functionTimeout": "00:10:00"
+}

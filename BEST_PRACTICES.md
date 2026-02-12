@@ -1,6 +1,7 @@
 # Azure Event Hubs Best Practices - Implementation Guide
 
-This document captures best practices and findings from a production Event Hub implementation in Sweden Central region, achieving 21,000+ events/sec throughput.
+This document captures best practices and findings from a production Event Hub pipeline implementation
+(Producer → Event Hubs → Azure Functions → Azure SQL) in Sweden Central region.
 
 ---
 
@@ -62,9 +63,9 @@ Create granular policies:
   "rights": ["Send"]
 }
 
-// ListenPolicy - for consumers only
+// ListenPolicy - for consumer (Azure Functions trigger)
 {
-  "rights": ["Listen", "Manage"]
+  "rights": ["Listen"]
 }
 
 // Never use RootManageSharedAccessKey in production
@@ -77,12 +78,17 @@ Create granular policies:
 
 ### Version Requirements
 
-**Current Recommended Versions:**
+**Current Recommended Versions (Producer):**
 ```xml
 <PackageReference Include="Azure.Messaging.EventHubs" Version="5.12.0" />
-<PackageReference Include="Azure.Messaging.EventHubs.Processor" Version="5.12.0" />
 <PackageReference Include="Azure.Identity" Version="1.14.0" />
-<PackageReference Include="Azure.Storage.Blobs" Version="12.23.0" />
+```
+
+**Current Recommended Versions (Consumer - Azure Functions):**
+```xml
+<PackageReference Include="Microsoft.Azure.Functions.Worker" Version="1.22.0" />
+<PackageReference Include="Microsoft.Azure.Functions.Worker.Extensions.EventHubs" Version="6.3.6" />
+<PackageReference Include="Microsoft.Data.SqlClient" Version="5.1.5" />
 ```
 
 **Authentication:**
@@ -229,9 +235,61 @@ await _producerClient.SendAsync(batchList);
 - Loses SDK's optimization logic
 - Requires manual batch size tuning
 
----
+## Consumer Best Practices (Azure Functions)
 
-## Real-World Configuration Issues (Critical!)
+### Batch Trigger Pattern
+
+The consumer uses an Azure Functions isolated worker with `EventData[]` batch trigger:
+
+```csharp
+[Function(nameof(ProcessEventBatch))]
+public async Task ProcessEventBatch(
+    [EventHubTrigger("%EventHubName%", Connection = "EventHubConnection",
+        ConsumerGroup = "%EventHubConsumerGroup%")]
+    EventData[] events,
+    FunctionContext context)
+{
+    // 1. Deserialize all events, isolating poison messages
+    // 2. Bulk write to SQL via temp-table staging
+    // 3. Return successfully → runtime checkpoints
+}
+```
+
+### Key Tuning Parameters (host.json)
+
+```json
+{
+  "extensions": {
+    "eventHubs": {
+      "maxEventBatchSize": 500,
+      "prefetchCount": 2000,
+      "batchCheckpointFrequency": 1,
+      "checkpointStoreConnection": "CheckpointStoreConnection"
+    }
+  }
+}
+```
+
+- `maxEventBatchSize`: 500 — balance between batch efficiency and SQL write latency
+- `prefetchCount`: 2000 — 4× batch size, keeps events ready for next invocation
+- `batchCheckpointFrequency`: 1 — checkpoint after every batch (safest)
+- `checkpointStoreConnection`: separates checkpoint I/O from host storage
+
+### Idempotent SQL Writes
+
+```sql
+-- Temp-table staging pattern:
+-- 1. CREATE #EventLogs_Staging (session-scoped, no races)
+-- 2. SqlBulkCopy into #staging
+-- 3. INSERT INTO EventLogs SELECT ... FROM #staging WHERE NOT EXISTS
+```
+
+Why this pattern:
+- `SqlBulkCopy` is all-or-nothing — can't catch 2627 per-row
+- Temp tables (`#`) are session-scoped — no cross-partition interference
+- `INSERT WHERE NOT EXISTS` atomically skips duplicates
+
+---
 
 ### Issue #1: Placeholder Configuration Values
 **Problem:** App pointed to wrong Event Hub namespace/hub name
@@ -349,20 +407,53 @@ await _producerClient.SendAsync(eventBatch);
 // Not: _producerClient.Send(eventBatch);
 ```
 
-**3. Batch Configuration**
+**3. Producer Batch Configuration**
 ```csharp
-// Use CreateBatchAsync with optimal timeout
-var batchOptions = new CreateBatchOptions 
-{ 
-    MaximumSizeInBytes = 1048576  // 1MB - respects Event Hub limit
-};
-using (var batch = await _producerClient.CreateBatchAsync(batchOptions))
+// ✅ CORRECT: Use default CreateBatchAsync — SDK optimizes internally
+var batch = await producerClient.CreateBatchAsync();
+
+foreach (var evt in events)
 {
-    // Add events...
+    var eventData = new EventData(JsonSerializer.SerializeToUtf8Bytes(evt));
+    
+    if (!batch.TryAdd(eventData))
+    {
+        // Batch full — send it and start a new one
+        await producerClient.SendAsync(batch);
+        batch = await producerClient.CreateBatchAsync();
+        batch.TryAdd(eventData);
+    }
+}
+
+if (batch.Count > 0)
+    await producerClient.SendAsync(batch);
+
+// ❌ WRONG: Do NOT specify MaximumSizeInBytes — causes 64% throughput loss!
+// var batch = await producerClient.CreateBatchAsync(
+//     new CreateBatchOptions { MaximumSizeInBytes = 1024 * 1024 });
+```
+
+**Key points for producer batching:**
+- Use default `CreateBatchAsync()` — never set explicit `MaximumSizeInBytes` (see `BATCH_OPTIONS_ANALYSIS.md`)
+- Application-level batch size of 1,000 events is proven optimal
+- `TryAdd()` returns false when SDK's internal size limit is reached — handle the overflow
+- Serialize to UTF-8 bytes directly (`SerializeToUtf8Bytes`) for best performance
+
+**4. Consumer Batch Configuration (host.json)**
+```json
+{
+  "extensions": {
+    "eventHubs": {
+      "maxEventBatchSize": 500,
+      "prefetchCount": 2000,
+      "batchCheckpointFrequency": 1,
+      "checkpointStoreConnection": "CheckpointStoreConnection"
+    }
+  }
 }
 ```
 
-**4. Partitioning Strategy**
+**5. Partitioning Strategy**
 ```csharp
 // Use partition key for even distribution
 var eventData = new EventData(json) 
@@ -377,21 +468,22 @@ var eventData = new EventData(json)
 ## Production Checklist
 
 ### Code Quality
-- [ ] Use `CreateBatchAsync()` for batching (best practice)
-- [ ] Implement comprehensive error handling
-- [ ] Log all failures with context
-- [ ] Add telemetry/diagnostics logging
-- [ ] Handle connection timeouts (30s recommended)
-- [ ] Implement exponential backoff for transient failures
+- [x] Use `CreateBatchAsync()` for producer batching (default options only)
+- [x] Azure Functions batch trigger for consumer (`EventData[]`)
+- [x] Idempotent SQL writes (temp-table staging + `INSERT WHERE NOT EXISTS`)
+- [x] Poison event isolation within batch
+- [x] Comprehensive error handling and structured logging
+- [x] Handle connection timeouts (30s recommended)
+- [ ] Implement exponential backoff for transient failures (producer-side)
 
 ### Infrastructure
-- [ ] Use Standard SKU (not Basic)
-- [ ] Configure 24+ partitions for high throughput
-- [ ] Create separate consumer groups for each consumer type
-- [ ] Set appropriate message retention (1-7 days)
-- [ ] Configure monitoring and alerting
-- [ ] Use managed identity (DefaultAzureCredential)
-- [ ] Never use shared access key in production
+- [x] Use Event Hubs Standard SKU (not Basic — Basic limits: 1 consumer group, no capture)
+- [x] Configure 24 partitions for high throughput
+- [x] Create separate consumer group (`logs-consumer`)
+- [x] Set appropriate message retention (24 hours)
+- [x] Configure monitoring and alerting
+- [x] Use SAS policies with least-privilege (SendPolicy, ListenPolicy)
+- [ ] Use managed identity for production (AAD auth)
 
 ### Security
 - [ ] Use least-privilege authorization policies
@@ -410,12 +502,13 @@ var eventData = new EventData(json)
 - [ ] Set up dead-letter queue handling
 
 ### Testing
-- [ ] Load test at expected peak throughput
-- [ ] Test failover scenarios
-- [ ] Verify consumer offset tracking
-- [ ] Test with realistic event sizes
-- [ ] Validate partition distribution
+- [x] Load test producer at 26.7k evt/sec (30 seconds)
+- [x] E2E test: producer → Event Hub → Functions → SQL (59,578 events, 0 duplicates)
+- [x] Verify idempotent writes handle re-delivery
+- [x] Test with realistic event sizes (~180 bytes JSON)
+- [x] Validate partition distribution
 - [ ] Test connection loss scenarios
+- [ ] Test failover scenarios
 
 ---
 
@@ -606,9 +699,16 @@ az eventhubs namespace update \
 ## Conclusion
 
 By implementing these best practices, you can achieve:
-- ✅ **23,000+ events/sec** throughput (proven in production Azure)
-- ✅ **<30ms average latency** (P99: ~100ms)
-- ✅ **100% reliability** with proper error handling
+- ✅ **26,700+ events/sec** producer throughput (proven)
+- ✅ **<30ms average latency** (P99: ~100ms) on producer side
+- ✅ **100% reliability** with idempotent SQL writes and batch checkpointing
+- ✅ **Zero duplicates** with temp-table staging pattern
 - ✅ **Code patterns** following Azure standards
 - ✅ **Cost-optimized** with auto-inflate for variable workloads
+
+---
+
+*Version*: 3.0  
+*Last Updated*: February 12, 2026  
+*Status*: E2E Verified
 

@@ -1,6 +1,9 @@
-# CreateBatchOptions Performance Analysis
+# CreateBatchOptions Performance Analysis (Producer)
 
-## Critical Finding: MaximumSizeInBytes Reduces Throughput
+## Critical Finding: MaximumSizeInBytes Reduces Producer Throughput
+
+> **Note:** This analysis applies to the **producer** (`src/`) only. The consumer is an Azure Functions
+> batch trigger (`src-function/`) that receives events via `EventData[]` — no `CreateBatchOptions` involved.
 
 ### The Problem
 When explicitly setting `CreateBatchOptions` with `MaximumSizeInBytes`, performance **degraded significantly**:

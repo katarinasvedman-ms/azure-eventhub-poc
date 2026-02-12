@@ -1,10 +1,11 @@
-# Event Hub PoC - Setup & Deployment Guide
+# Event Hub Pipeline - Setup & Deployment Guide
 
 ## Quick Start
 
 ### Prerequisites
 - .NET 8 SDK
 - Azure CLI
+- Azure Functions Core Tools v4 (v4.6.0+)
 - Azure Subscription
 
 ### Local Development Setup
@@ -49,26 +50,36 @@ az deployment group show `
   --output json
 ```
 
-#### 4. Run Producer/Consumer Locally
+#### 4. Run Producer (Load Test)
 ```powershell
 cd src
 
-# Run with default settings
-dotnet run --configuration Release
+# Run a 5-second load test (~7,000 events)
+dotnet run -c Release -- --load-test=5
 
-# Or build release binary
-dotnet publish -c Release
-.\bin\Release\net8.0\publish\MetricSysPoC.exe
+# Run a 30-second sustained test
+dotnet run -c Release -- --load-test=30
 ```
 
-#### 5. Run Consumer Only (Skip Database)
+#### 5. Run Consumer (Azure Functions)
 ```powershell
-cd src-consumer
+cd src-function
 
-# Test consumer throughput without database bottleneck
-dotnet run -- --no-db
+# Build and publish
+dotnet publish -c Release -o publish
 
-# Results show actual event consumption rate from Event Hub
+# Start the function (with SQL AAD token)
+cd publish
+$token = (az account get-access-token --resource "https://database.windows.net/" --query accessToken -o tsv)
+$env:SqlAccessToken = $token
+func start
+```
+
+#### 6. Apply SQL Migration (First Time Only)
+```powershell
+# Run the idempotency migration against your database
+$token = (az account get-access-token --resource "https://database.windows.net/" --query accessToken -o tsv)
+# Execute infra/migrations/001_add_idempotency.sql against your SQL database
 ```
 
 ---
@@ -121,18 +132,25 @@ az monitor metrics list `
 
 ### Batch Size Settings
 ```json
+// Producer: 1,000 events per publish batch (src/)
+// Consumer: host.json (src-function/)
 {
-  "EventHub": {
-    "BatchSize": 1000,
-    "BatchTimeoutMs": 1000
+  "extensions": {
+    "eventHubs": {
+      "maxEventBatchSize": 500,
+      "prefetchCount": 2000,
+      "batchCheckpointFrequency": 1,
+      "checkpointStoreConnection": "CheckpointStoreConnection"
+    }
   }
 }
 ```
 
 **Recommendations:**
-- Batch size 1,000: Proven optimal throughput (26.7k evt/sec)
-- Timeout 1,000ms: Ensures timely flush even with slow input
-- **DO NOT use explicit MaximumSizeInBytes** (causes 64% throughput loss)
+- Producer batch size 1,000: Proven optimal throughput (26.7k evt/sec)
+- Consumer batch size 500: Good balance between throughput and SQL write latency
+- Prefetch 2,000: 4× batch size keeps events ready for next invocation
+- **DO NOT use explicit MaximumSizeInBytes** on producer (causes 64% throughput loss)
 
 ### Partition Count
 ```
@@ -148,12 +166,13 @@ If throughput < 20k evt/sec:
 
 ### Database Configuration
 ```
-Current SKU: Basic (2GB, 5 DTU)
-Consumer: Sequential (1.3k evt/sec max)
+Current: Azure SQL with AAD-only authentication
+Table: EventLogs with unique index on EventId_Business
+Writer: SqlBulkCopy + temp-table staging (idempotent)
 
-For 20k+ evt/sec:
-- Implement parallel processing (batch writes per partition)
-- Not yet implemented (next optimization)
+SQL Migration: infra/migrations/001_add_idempotency.sql
+- Adds unique index on EventId_Business
+- Enables INSERT WHERE NOT EXISTS pattern
 ```
 
 ### Connection Pooling
@@ -179,9 +198,9 @@ az account show
 
 ### "Throughput lower than expected"
 **Checklist:**
-1. ✅ No explicit `MaximumSizeInBytes` in `CreateBatchOptions`
+1. ✅ No explicit `MaximumSizeInBytes` in `CreateBatchOptions` (producer)
 2. ✅ Producer client is singleton (check Program.cs)
-3. ✅ Batch size at least 1,000 events
+3. ✅ Producer batch size at least 1,000 events
 4. ✅ Event Hub has 24 partitions (check Azure Portal)
 5. ✅ No throttling errors in console output
 
@@ -197,32 +216,30 @@ az monitor metrics list `
 # If present, verify partition count and batch sizes
 ```
 
-### "Consumer falling behind"
-**Current limitation:** Single-threaded consumer = ~1.3k evt/sec max
+### "Consumer not processing events"
+**Checklist:**
+1. `func start` shows "Found: Host.Functions.ProcessEventBatch"
+2. Event Hub connection string uses `ListenPolicy` (Listen rights only)
+3. `initialOffsetOptions.enqueuedTimeUtc` in host.json is before your events
+4. Check for stale checkpoints in `azure-webjobs-eventhub` container
+5. Functions Core Tools v4.6.0+ (`func --version`)
 
-**Workaround:** Use `--no-db` flag to measure raw Event Hub throughput
+**SQL auth issues:**
 ```powershell
-cd src-consumer
-dotnet run -- --no-db
+# For AAD-only SQL databases, pass a pre-acquired token:
+$token = (az account get-access-token --resource "https://database.windows.net/" --query accessToken -o tsv)
+$env:SqlAccessToken = $token
+func start
 ```
 
-**Solution:** Implement parallel processing per partition (TODO)
-
-### "Data loss after restart"
+### "Stale checkpoints from failed runs"
 ```powershell
-# Verify checkpoint storage exists
-az storage account show `
-  --name "sablobfuwf32lf57ise" `
-  --resource-group "rg-eventhub-dev"
+# Delete checkpoint container to reset all checkpoints
+az storage container delete \
+  --account-name "your-storage-account" \
+  --name "azure-webjobs-eventhub"
 
-# Check checkpoint container
-az storage container list `
-  --account-name "sablobfuwf32lf57ise"
-
-# Verify checkpoints are being created:
-az storage blob list `
-  --account-name "sablobfuwf32lf57ise" `
-  --container-name "eventhub-checkpoints"
+# Or adjust initialOffsetOptions.enqueuedTimeUtc in host.json
 ```
 
 ---
@@ -253,30 +270,24 @@ az sql server delete `
 
 ```powershell
 # View Event Hub status
-az eventhubs namespace show --name "eventhub-dev-xxx" --resource-group "rg-eventhub-dev" --output table
-
-# Scale Event Hub (if needed)
-az eventhubs namespace update `
-  --name "eventhub-dev-xxx" `
-  --resource-group "rg-eventhub-dev" `
-  --sku Standard `
-  --capacity 4
+az eventhubs namespace show --name "your-namespace" --resource-group "rg-logsysng-dev" --output table
 
 # Get all resources in group
-az resource list --resource-group "rg-eventhub-dev" --output table
+az resource list --resource-group "rg-logsysng-dev" --output table
 
-# Build and run locally
+# Producer load test
 cd src
-dotnet build -c Release
-dotnet run --configuration Release
+dotnet run -c Release -- --load-test=5
 
-# Test consumer only (skip database)
-cd src-consumer
-dotnet run -- --no-db
+# Start consumer function
+cd src-function/publish
+$token = (az account get-access-token --resource "https://database.windows.net/" --query accessToken -o tsv)
+$env:SqlAccessToken = $token
+func start
 ```
 
 ---
 
-*Version*: 2.0  
-*Last Updated*: December 17, 2025  
-*Status*: PoC Complete (Proven 26.7k evt/sec)
+*Version*: 3.0  
+*Last Updated*: February 12, 2026  
+*Status*: E2E Verified — Azure Load Testing (API 2,790 req/sec | Producer 50.7k evt/sec | Consumer 4,283 evt/sec | 0 duplicates)

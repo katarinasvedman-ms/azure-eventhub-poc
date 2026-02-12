@@ -19,6 +19,12 @@
     },
     "storageAccountSku": {
       "value": "Standard_LRS"
+    },
+    "aadAdminLogin": {
+      "value": "kapeltol_microsoft.com#EXT#@fdpo.onmicrosoft.com"
+    },
+    "aadAdminSid": {
+      "value": "7305afcc-e26e-486f-bb5b-fc910fade69a"
     }
   }
 }

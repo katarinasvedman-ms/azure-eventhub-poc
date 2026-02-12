@@ -1,0 +1,50 @@
+##############################################################################
+# Azure Load Testing – Configuration
+# Upload this alongside api-load-test.jmx in the Azure Portal
+# or use: az load test create --load-test-config-file load-test.yaml
+##############################################################################
+
+version: v0.1
+testId: eventhub-api-e2e
+testName: "EventHub API E2E Load Test"
+testPlan: api-load-test.jmx
+description: >
+  Production-pattern load test: 1-10 logs per batch request at scale.
+  Tests both /api/logs/ingest-batch (250 threads) and /api/logs/ingest (50 threads).
+  Duration: 5 minutes with 60s ramp-up.
+
+engineInstances: 2          # 2 load gen engines = distributed test, bypasses single-client bottleneck
+
+# Override JMeter properties (can be adjusted per run in the portal)
+properties:
+  userPropertyFile: ""
+
+# Pass JMeter properties via -J flags
+env:
+  - name: apiHost
+    value: api-logsysng-eyeqfiorm5tv2.azurewebsites.net
+  - name: threads
+    value: "250"
+  - name: duration
+    value: "300"
+  - name: rampUp
+    value: "60"
+
+# Auto-collect server-side metrics from your App Service, Event Hub, Function, SQL
+# Add these resource IDs in the Azure Portal under "Monitoring" tab, or list them here:
+# appComponents:
+#   - resourceId: /subscriptions/c14bdd62-1e4f-4fcc-9790-ffdfcd051c5f/resourceGroups/rg-logsysng-dev/providers/Microsoft.Web/sites/api-logsysng-eyeqfiorm5tv2
+#     resourceType: Microsoft.Web/sites
+#     resourceName: api-logsysng-eyeqfiorm5tv2
+#   - resourceId: /subscriptions/c14bdd62-1e4f-4fcc-9790-ffdfcd051c5f/resourceGroups/rg-logsysng-dev/providers/Microsoft.EventHub/namespaces/eventhub-dev-eyeqfiorm5tv2
+#     resourceType: Microsoft.EventHub/namespaces
+#     resourceName: eventhub-dev-eyeqfiorm5tv2
+#   - resourceId: /subscriptions/c14bdd62-1e4f-4fcc-9790-ffdfcd051c5f/resourceGroups/rg-logsysng-dev/providers/Microsoft.Web/sites/func-logsysng-premium-eyeqfiorm5tv2
+#     resourceType: Microsoft.Web/sites
+#     resourceName: func-logsysng-premium-eyeqfiorm5tv2
+
+# Fail criteria — auto-fail the test if thresholds are breached
+failureCriteria:
+  - avg(response_time_ms) > 500          # Average latency must stay under 500ms
+  - percentage(error) > 5                # Error rate must stay under 5%
+  - p90(response_time_ms) > 1000         # P90 must stay under 1s

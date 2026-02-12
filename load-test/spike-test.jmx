@@ -1,0 +1,220 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<jmeterTestPlan version="1.2" properties="5.0" jmeter="5.6">
+  <hashTree>
+    <TestPlan guiclass="TestPlanGui" testclass="TestPlan" testname="EventHub API Spike Test (20k req/sec)" enabled="true">
+      <stringProp name="TestPlan.comments">Spike test: blast 20k req/sec for 2 minutes, then stop. Measures Event Hub buffer drain time to SQL.</stringProp>
+      <boolProp name="TestPlan.functional_mode">false</boolProp>
+      <boolProp name="TestPlan.serialize_threadgroups">false</boolProp>
+      <elementProp name="TestPlan.user_defined_variables" elementType="Arguments" guiclass="ArgumentsPanel" testclass="Arguments" testname="User Defined Variables" enabled="true">
+        <collectionProp name="Arguments.arguments">
+          <elementProp name="API_HOST" elementType="Argument">
+            <stringProp name="Argument.name">API_HOST</stringProp>
+            <stringProp name="Argument.value">${__P(apiHost,api-logsysng-eyeqfiorm5tv2.azurewebsites.net)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="BATCH_THREADS" elementType="Argument">
+            <stringProp name="Argument.name">BATCH_THREADS</stringProp>
+            <stringProp name="Argument.value">${__P(batchThreads,900)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="SINGLE_THREADS" elementType="Argument">
+            <stringProp name="Argument.name">SINGLE_THREADS</stringProp>
+            <stringProp name="Argument.value">${__P(singleThreads,100)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="DURATION" elementType="Argument">
+            <stringProp name="Argument.name">DURATION</stringProp>
+            <stringProp name="Argument.value">${__P(duration,120)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="RAMP_UP" elementType="Argument">
+            <stringProp name="Argument.name">RAMP_UP</stringProp>
+            <stringProp name="Argument.value">${__P(rampUp,30)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+        </collectionProp>
+      </elementProp>
+    </TestPlan>
+    <hashTree>
+
+      <!-- ==================== BATCH ENDPOINT – 900 threads/engine ==================== -->
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Spike - Batch Ingest" enabled="true">
+        <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
+        <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController" testname="Loop Controller" enabled="true">
+          <boolProp name="LoopController.continue_forever">false</boolProp>
+          <intProp name="LoopController.loops">-1</intProp>
+        </elementProp>
+        <stringProp name="ThreadGroup.num_threads">${BATCH_THREADS}</stringProp>
+        <stringProp name="ThreadGroup.ramp_time">${RAMP_UP}</stringProp>
+        <boolProp name="ThreadGroup.scheduler">true</boolProp>
+        <stringProp name="ThreadGroup.duration">${DURATION}</stringProp>
+        <stringProp name="ThreadGroup.delay">0</stringProp>
+      </ThreadGroup>
+      <hashTree>
+
+        <!-- Random batch size 1-10 (production pattern) -->
+        <RandomVariableConfig guiclass="TestBeanGUI" testclass="RandomVariableConfig" testname="Random Batch Size" enabled="true">
+          <stringProp name="variableName">batchSize</stringProp>
+          <stringProp name="minimumValue">1</stringProp>
+          <stringProp name="maximumValue">10</stringProp>
+          <stringProp name="outputFormat"></stringProp>
+          <boolProp name="perThread">true</boolProp>
+        </RandomVariableConfig>
+        <hashTree/>
+
+        <JSR223PreProcessor guiclass="TestBeanGUI" testclass="JSR223PreProcessor" testname="Generate Batch Payload" enabled="true">
+          <stringProp name="scriptLanguage">groovy</stringProp>
+          <stringProp name="script">
+import groovy.json.JsonOutput
+
+def batchSize = vars.get("batchSize") as int
+def events = []
+
+for (int i = 0; i &lt; batchSize; i++) {
+    def evt = [
+        message    : "Spike test event ${UUID.randomUUID()}",
+        source     : "SpikeTest-Batch",
+        level      : ["Information", "Warning", "Error", "Debug"][new Random().nextInt(4)],
+        partitionKey: "spike-user-${new Random().nextInt(1000)}"
+    ]
+    events.add(evt)
+}
+
+def payload = JsonOutput.toJson([events: events])
+vars.put("requestBody", payload)
+          </stringProp>
+        </JSR223PreProcessor>
+        <hashTree/>
+
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="POST /api/logs/ingest-batch" enabled="true">
+          <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments" testname="User Defined Variables" enabled="true">
+            <collectionProp name="Arguments.arguments"/>
+          </elementProp>
+          <stringProp name="HTTPSampler.domain">${API_HOST}</stringProp>
+          <stringProp name="HTTPSampler.port">443</stringProp>
+          <stringProp name="HTTPSampler.protocol">https</stringProp>
+          <stringProp name="HTTPSampler.contentEncoding">UTF-8</stringProp>
+          <stringProp name="HTTPSampler.path">/api/logs/ingest-batch</stringProp>
+          <stringProp name="HTTPSampler.method">POST</stringProp>
+          <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+          <boolProp name="HTTPSampler.auto_redirects">false</boolProp>
+          <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+          <boolProp name="HTTPSampler.DO_MULTIPART_POST">false</boolProp>
+          <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
+          <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+            <collectionProp name="Arguments.arguments">
+              <elementProp name="" elementType="HTTPArgument">
+                <boolProp name="HTTPArgument.always_encode">false</boolProp>
+                <stringProp name="Argument.value">${requestBody}</stringProp>
+                <stringProp name="Argument.metadata">=</stringProp>
+              </elementProp>
+            </collectionProp>
+          </elementProp>
+        </HTTPSamplerProxy>
+        <hashTree>
+          <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager" testname="HTTP Headers" enabled="true">
+            <collectionProp name="HeaderManager.headers">
+              <elementProp name="" elementType="Header">
+                <stringProp name="Header.name">Content-Type</stringProp>
+                <stringProp name="Header.value">application/json</stringProp>
+              </elementProp>
+            </collectionProp>
+          </HeaderManager>
+          <hashTree/>
+
+          <ResponseAssertion guiclass="AssertionGui" testclass="ResponseAssertion" testname="Assert 202" enabled="true">
+            <collectionProp name="Asserion.test_strings">
+              <stringProp name="49587">202</stringProp>
+            </collectionProp>
+            <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
+            <boolProp name="Assertion.assume_success">false</boolProp>
+            <intProp name="Assertion.test_type">8</intProp>
+          </ResponseAssertion>
+          <hashTree/>
+        </hashTree>
+
+      </hashTree>
+
+      <!-- ==================== SINGLE EVENT ENDPOINT – 100 threads/engine ==================== -->
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Spike - Single Ingest" enabled="true">
+        <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
+        <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController" testname="Loop Controller" enabled="true">
+          <boolProp name="LoopController.continue_forever">false</boolProp>
+          <intProp name="LoopController.loops">-1</intProp>
+        </elementProp>
+        <stringProp name="ThreadGroup.num_threads">${SINGLE_THREADS}</stringProp>
+        <stringProp name="ThreadGroup.ramp_time">${RAMP_UP}</stringProp>
+        <boolProp name="ThreadGroup.scheduler">true</boolProp>
+        <stringProp name="ThreadGroup.duration">${DURATION}</stringProp>
+        <stringProp name="ThreadGroup.delay">0</stringProp>
+      </ThreadGroup>
+      <hashTree>
+
+        <JSR223PreProcessor guiclass="TestBeanGUI" testclass="JSR223PreProcessor" testname="Generate Single Payload" enabled="true">
+          <stringProp name="scriptLanguage">groovy</stringProp>
+          <stringProp name="script">
+import groovy.json.JsonOutput
+
+def payload = JsonOutput.toJson([
+    message    : "Spike single event ${UUID.randomUUID()}",
+    source     : "SpikeTest-Single",
+    level      : "Information",
+    partitionKey: "spike-single-${new Random().nextInt(500)}"
+])
+vars.put("singleBody", payload)
+          </stringProp>
+        </JSR223PreProcessor>
+        <hashTree/>
+
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="POST /api/logs/ingest" enabled="true">
+          <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments" testname="User Defined Variables" enabled="true">
+            <collectionProp name="Arguments.arguments"/>
+          </elementProp>
+          <stringProp name="HTTPSampler.domain">${API_HOST}</stringProp>
+          <stringProp name="HTTPSampler.port">443</stringProp>
+          <stringProp name="HTTPSampler.protocol">https</stringProp>
+          <stringProp name="HTTPSampler.contentEncoding">UTF-8</stringProp>
+          <stringProp name="HTTPSampler.path">/api/logs/ingest</stringProp>
+          <stringProp name="HTTPSampler.method">POST</stringProp>
+          <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+          <boolProp name="HTTPSampler.auto_redirects">false</boolProp>
+          <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+          <boolProp name="HTTPSampler.DO_MULTIPART_POST">false</boolProp>
+          <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
+          <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+            <collectionProp name="Arguments.arguments">
+              <elementProp name="" elementType="HTTPArgument">
+                <boolProp name="HTTPArgument.always_encode">false</boolProp>
+                <stringProp name="Argument.value">${singleBody}</stringProp>
+                <stringProp name="Argument.metadata">=</stringProp>
+              </elementProp>
+            </collectionProp>
+          </elementProp>
+        </HTTPSamplerProxy>
+        <hashTree>
+          <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager" testname="HTTP Headers" enabled="true">
+            <collectionProp name="HeaderManager.headers">
+              <elementProp name="" elementType="Header">
+                <stringProp name="Header.name">Content-Type</stringProp>
+                <stringProp name="Header.value">application/json</stringProp>
+              </elementProp>
+            </collectionProp>
+          </HeaderManager>
+          <hashTree/>
+
+          <ResponseAssertion guiclass="AssertionGui" testclass="ResponseAssertion" testname="Assert 202" enabled="true">
+            <collectionProp name="Asserion.test_strings">
+              <stringProp name="49587">202</stringProp>
+            </collectionProp>
+            <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
+            <boolProp name="Assertion.assume_success">false</boolProp>
+            <intProp name="Assertion.test_type">8</intProp>
+          </ResponseAssertion>
+          <hashTree/>
+        </hashTree>
+
+      </hashTree>
+
+    </hashTree>
+  </hashTree>
+</jmeterTestPlan>

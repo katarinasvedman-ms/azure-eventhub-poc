@@ -169,17 +169,18 @@ Benefits: Unlimited throughput, SLA guarantees
 
 ## Implementation Checklist
 
-- [ ] Create Standard tier Event Hub with 24 partitions
-- [ ] Configure 3 consumer groups (logs, monitoring, archive)
-- [ ] Enable 24-hour retention (default)
-- [ ] Set up Azure Blob Storage for checkpointing
-- [ ] Configure distributed tracing (Application Insights)
-- [ ] Deploy batching service (100-500 event batches)
-- [ ] Set up monitoring alerts:
+- [x] Create Standard tier Event Hub with 24 partitions
+- [x] Configure consumer group (`logs-consumer`)
+- [x] Enable 24-hour retention (default)
+- [x] Set up Azure Blob Storage for checkpointing
+- [x] Deploy Azure Functions consumer with batch trigger
+- [x] Implement idempotent SQL writes (temp-table staging + unique index)
+- [x] Set up monitoring (structured logging with batch metrics)
+- [x] Load testing: producer 26.7k evt/sec, consumer E2E verified (59,578 events, 0 duplicates)
+- [ ] Set up alerts:
   - [ ] Partition utilization >80%
   - [ ] Throttled requests (429 errors)
   - [ ] End-to-end latency >2 seconds
-- [ ] Load testing with direct SDK (proven: 26.7k evt/sec, 802k events over 30 seconds)
 - [ ] Document upgrade trigger: "When partition utilization >85% for 7 days"
 
 ---
@@ -195,4 +196,4 @@ Benefits: Unlimited throughput, SLA guarantees
 | **Growth capacity?** | 2-3x before upgrade needed |
 | **When to upgrade?** | When hitting 35k+ evt/sec |
 
-**Status: READY FOR DEPLOYMENT** ✅
+**Status: DEPLOYED & E2E VERIFIED** ✅

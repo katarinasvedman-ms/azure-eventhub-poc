@@ -1,0 +1,36 @@
+##############################################################################
+# Azure Load Testing – Spike Test Configuration
+# Goal: Hit 20k req/sec for 2 minutes, then stop.
+# Measure how long Event Hub backlog drains to SQL.
+##############################################################################
+
+version: v0.1
+testId: eventhub-api-spike-20k
+testName: "Spike Test: 20k req/sec for 2 minutes"
+testPlan: spike-test.jmx
+description: >
+  Spike test proving the Event Hub buffer pattern handles 20k req/sec bursts.
+  900 batch threads + 100 single threads per engine × 5 engines = 5,000 total threads.
+  Duration: 2 minutes with 30s ramp-up.
+  After the test ends, monitor SQL to measure backlog drain time.
+
+engineInstances: 5          # 5 engines to generate enough load for 20k req/sec
+
+# JMeter properties
+env:
+  - name: apiHost
+    value: api-logsysng-eyeqfiorm5tv2.azurewebsites.net
+  - name: batchThreads
+    value: "900"
+  - name: singleThreads
+    value: "100"
+  - name: duration
+    value: "120"
+  - name: rampUp
+    value: "30"
+
+# Fail criteria — more lenient for spike test (expect higher latency under extreme load)
+failureCriteria:
+  - avg(response_time_ms) > 1000         # Average latency must stay under 1s
+  - percentage(error) > 10               # Error rate must stay under 10%
+  - p90(response_time_ms) > 3000         # P90 must stay under 3s

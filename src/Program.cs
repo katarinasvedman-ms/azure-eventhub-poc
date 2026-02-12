@@ -1,19 +1,26 @@
 using Azure.Identity;
 using Azure.Messaging.EventHubs;
 using Azure.Messaging.EventHubs.Producer;
-using Azure.Messaging.EventHubs.Processor;
-using Azure.Storage.Blobs;
 using MetricSysPoC.Configuration;
 using MetricSysPoC.Services;
-using Microsoft.Extensions.Options;
+using MetricSysPoC.Middleware;
 
 // Check for load test mode
-var loadTestDuration = args.FirstOrDefault(a => a.StartsWith("--load-test="))?.Split('=').LastOrDefault();
-if (int.TryParse(loadTestDuration, out var seconds) && seconds > 0)
+var loadTestArg = args.FirstOrDefault(a => a.StartsWith("--load-test="));
+if (loadTestArg is not null)
 {
-    // Load test mode - run producer standalone
-    await RunLoadTest(seconds);
-    return;
+    var parts = loadTestArg.Split('=');
+    if (int.TryParse(parts.LastOrDefault(), out var seconds) && seconds > 0)
+    {
+        var apiUrl = args.FirstOrDefault(a => a.StartsWith("--api-url="))?.Split('=', 2).LastOrDefault()
+                     ?? "http://localhost:5000";
+        var logsPerReq = 1;
+        var logsArg = args.FirstOrDefault(a => a.StartsWith("--logs-per-request="))?.Split('=').LastOrDefault();
+        if (int.TryParse(logsArg, out var lpr) && lpr > 0) logsPerReq = lpr;
+
+        await RunLoadTest(seconds, apiUrl, logsPerReq);
+        return;
+    }
 }
 
 var builder = WebApplication.CreateBuilder(args);
@@ -32,10 +39,18 @@ builder.Services.Configure<EventHubOptions>(builder.Configuration.GetSection("Ev
 var credential = new DefaultAzureCredential();
 
 // Event Hub Producer Client (singleton for connection pooling)
-var producerClient = new EventHubProducerClient(
-    eventHubOptions.FullyQualifiedNamespace,
-    eventHubOptions.HubName,
-    credential);
+EventHubProducerClient producerClient;
+if (eventHubOptions.UseKeyAuthentication && !string.IsNullOrEmpty(eventHubOptions.ConnectionString))
+{
+    producerClient = new EventHubProducerClient(eventHubOptions.ConnectionString, eventHubOptions.HubName);
+}
+else
+{
+    producerClient = new EventHubProducerClient(
+        eventHubOptions.FullyQualifiedNamespace,
+        eventHubOptions.HubName,
+        credential);
+}
 
 builder.Services.AddSingleton(producerClient);
 
@@ -43,8 +58,24 @@ builder.Services.AddSingleton(producerClient);
 // Application Services
 // ========================
 builder.Services.AddSingleton<IEventHubProducerService, EventHubProducerService>();
-builder.Services.AddSingleton<IEventHubConsumerService, EventHubConsumerService>();
-builder.Services.AddScoped<ISqlPersistenceService, SqlPersistenceService>();
+builder.Services.AddSingleton<IEventBatchingService, EventBatchingService>();
+
+// ========================
+// API Setup
+// ========================
+builder.Services.AddControllers();
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen(options =>
+{
+    options.SwaggerDoc("v1", new Microsoft.OpenApi.Models.OpenApiInfo
+    {
+        Title = "LogsysNG Event Hub PoC",
+        Version = "v1",
+        Description = "Proof of Concept for high-throughput Event Hub integration"
+    });
+});
+
+builder.Services.AddHealthChecks();
 
 // ========================
 // Observability
@@ -62,146 +93,216 @@ builder.Services
 // ========================
 var app = builder.Build();
 
-app.UseRouting();
-
-// ========================
-// Background Services
-// ========================
-var consumerService = app.Services.GetRequiredService<IEventHubConsumerService>();
-
-// Start consumer processing in background
-_ = Task.Run(async () =>
+if (app.Environment.IsDevelopment())
 {
-    try
+    app.UseSwagger();
+    app.UseSwaggerUI();
+}
+
+app.UseRouting();
+app.MapControllers();
+app.MapHealthChecks("/health");
+
+// ========================
+// Wire up batching → Event Hub producer
+// ========================
+var batchingService = app.Services.GetRequiredService<IEventBatchingService>();
+var producerService = app.Services.GetRequiredService<IEventHubProducerService>();
+
+if (batchingService is EventBatchingService typedBatching)
+{
+    typedBatching.BatchReady += async (sender, args) =>
     {
-        await consumerService.StartProcessingAsync();
-    }
-    catch (Exception ex)
-    {
-        app.Logger.LogError(ex, "Consumer processing failed");
-    }
-});
+        try
+        {
+            await producerService.PublishEventBatchAsync(args.Events, args.CorrelationId);
+        }
+        catch (Exception ex)
+        {
+            app.Logger.LogError(ex, "Failed to publish batch of {Count} events", args.BatchSize);
+        }
+    };
+}
 
 // Graceful shutdown
-app.Lifetime.ApplicationStopping.Register(async () =>
+app.Lifetime.ApplicationStopping.Register(() =>
 {
-    app.Logger.LogInformation("Application shutting down...");
-    await consumerService.StopProcessingAsync();
+    app.Logger.LogInformation("Application shutting down — flushing remaining events");
+    producerClient.CloseAsync().GetAwaiter().GetResult();
 });
 
 await app.RunAsync();
 
-// Load test function
-static async Task RunLoadTest(int durationSeconds)
+// Load test function — sends HTTP requests to the API, simulating real client traffic
+static async Task RunLoadTest(int durationSeconds, string apiUrl, int logsPerRequest)
 {
-    var config = new ConfigurationBuilder()
-        .AddJsonFile("appsettings.json")
-        .AddEnvironmentVariables()
-        .Build();
-
-    var eventHubOptions = new EventHubOptions();
-    config.GetSection("EventHub").Bind(eventHubOptions);
-
     var loggerFactory = LoggerFactory.Create(l => l.AddConsole());
     var logger = loggerFactory.CreateLogger("LoadTest");
 
-    var credential = new DefaultAzureCredential();
-    var producerClient = new EventHubProducerClient(
-        eventHubOptions.FullyQualifiedNamespace,
-        eventHubOptions.HubName,
-        credential);
-
-    try
+    const int MAX_CONCURRENT_REQUESTS = 64;
+    var handler = new SocketsHttpHandler
     {
-        var producerService = new EventHubProducerService(
-            producerClient,
-            loggerFactory.CreateLogger<EventHubProducerService>());
+        PooledConnectionLifetime = TimeSpan.FromMinutes(5),
+        MaxConnectionsPerServer = MAX_CONCURRENT_REQUESTS
+    };
+    var httpClient = new HttpClient(handler) { BaseAddress = new Uri(apiUrl) };
 
-        const int BATCH_SIZE = 1000;
-        var latencyTracker = new LatencyTracker();
-        var startTime = DateTime.UtcNow;
-        var endTime = startTime.AddSeconds(durationSeconds);
-        var eventCount = 0;
-        var lastReportTime = DateTime.UtcNow;
-        var lastReportCount = 0;
+    var latencyTracker = new LatencyTracker();
+    var startTime = DateTime.UtcNow;
+    var testRunId = $"loadtest-{startTime:yyyyMMddTHHmmssZ}";
+    var endTime = startTime.AddSeconds(durationSeconds);
+    var eventCount = 0;
+    var requestCount = 0;
+    var errorCount = 0;
+    var lastReportTime = DateTime.UtcNow;
+    var lastReportCount = 0;
+    var semaphore = new SemaphoreSlim(MAX_CONCURRENT_REQUESTS);
+    var pendingTasks = new List<Task>();
+    var lockObj = new object();
+    var random = new Random();
 
-        Console.WriteLine($"Starting load test for {durationSeconds} seconds with batch size {BATCH_SIZE}...");
-        Console.WriteLine();
+    Console.WriteLine($"╔════════════════════════════════════════════════════════════╗");
+    Console.WriteLine($"║             HTTP LOAD TEST                                ║");
+    Console.WriteLine($"╚════════════════════════════════════════════════════════════╝");
+    Console.WriteLine();
+    Console.WriteLine($"  Target API:           {apiUrl}");
+    Console.WriteLine($"  Duration:             {durationSeconds}s");
+    Console.WriteLine($"  Logs per request:     {logsPerRequest}");
+    Console.WriteLine($"  Max concurrency:      {MAX_CONCURRENT_REQUESTS}");
+    Console.WriteLine($"  Test Run ID:          {testRunId}");
+    Console.WriteLine();
 
-        var random = new Random();
-        while (DateTime.UtcNow < endTime)
+    // Choose endpoint based on logs per request
+    var useBatchEndpoint = logsPerRequest > 1;
+
+    while (DateTime.UtcNow < endTime)
+    {
+        await semaphore.WaitAsync();
+
+        Interlocked.Add(ref eventCount, logsPerRequest);
+        Interlocked.Increment(ref requestCount);
+
+        var task = Task.Run(async () =>
         {
-            var batch = new List<MetricSysPoC.Models.LogEvent>();
-            for (int i = 0; i < BATCH_SIZE; i++)
+            try
             {
-                batch.Add(new MetricSysPoC.Models.LogEvent
+                var reqStart = DateTime.UtcNow;
+                HttpResponseMessage response;
+
+                if (useBatchEndpoint)
                 {
-                    Id = Guid.NewGuid().ToString(),
-                    Source = $"source-{random.Next(10)}",
-                    Level = "INFO",
-                    Message = $"Load test event {eventCount + i}",
-                    Timestamp = DateTime.UtcNow,
-                    PartitionKey = $"key-{random.Next(100)}"
-                });
+                    var events = Enumerable.Range(0, logsPerRequest).Select(i => new
+                    {
+                        message = $"Load test event {testRunId}",
+                        source = testRunId,
+                        level = "INFO",
+                        partitionKey = $"key-{random.Next(100)}"
+                    });
+                    var payload = new { events };
+                    response = await httpClient.PostAsJsonAsync("/api/logs/ingest-batch", payload);
+                }
+                else
+                {
+                    var payload = new
+                    {
+                        message = $"Load test event {testRunId}",
+                        source = testRunId,
+                        level = "INFO",
+                        partitionKey = $"key-{random.Next(100)}"
+                    };
+                    response = await httpClient.PostAsJsonAsync("/api/logs/ingest", payload);
+                }
+
+                var latencyMs = (long)(DateTime.UtcNow - reqStart).TotalMilliseconds;
+                latencyTracker.Record(latencyMs);
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    Interlocked.Increment(ref errorCount);
+                    if (errorCount <= 5) // Only log first few errors
+                        logger.LogWarning("HTTP {StatusCode} from API", response.StatusCode);
+                }
             }
-
-            var batchStart = DateTime.UtcNow;
-            await producerService.PublishEventBatchAsync(batch);
-            var batchLatency = (long)(DateTime.UtcNow - batchStart).TotalMilliseconds;
-            
-            latencyTracker.Record(batchLatency);
-            eventCount += BATCH_SIZE;
-
-            var now = DateTime.UtcNow;
-            var elapsed = (int)(now - startTime).TotalSeconds;
-            
-            // Report every second
-            if ((now - lastReportTime).TotalSeconds >= 1)
+            catch (Exception ex)
             {
-                var intervalSecs = (now - lastReportTime).TotalSeconds;
-                var intervalEvents = eventCount - lastReportCount;
-                var intervalRate = intervalEvents / intervalSecs;
-                var totalSecs = (now - startTime).TotalSeconds;
-                var avgRate = eventCount / totalSecs;
-                Console.WriteLine($"[{elapsed:D2}/{durationSeconds}s] {eventCount:N0} events | Last 1s: {intervalRate:F0} evt/s | Running Avg: {avgRate:F0} evt/s");
-                lastReportTime = now;
-                lastReportCount = eventCount;
+                Interlocked.Increment(ref errorCount);
+                if (errorCount <= 5)
+                    logger.LogWarning(ex, "Request failed");
             }
+            finally
+            {
+                semaphore.Release();
+            }
+        });
+
+        lock (lockObj)
+        {
+            pendingTasks.Add(task);
+            pendingTasks.RemoveAll(t => t.IsCompleted);
         }
 
-        var totalElapsed = DateTime.UtcNow - startTime;
-        var finalRate = eventCount / totalElapsed.TotalSeconds;
-        var (p50, p95, p99, min, max, avg) = latencyTracker.GetStats();
+        var now = DateTime.UtcNow;
+        var elapsed = (int)(now - startTime).TotalSeconds;
 
-        Console.WriteLine();
-        Console.WriteLine("╔════════════════════════════════════════════════════════════╗");
-        Console.WriteLine("║             LOAD TEST RESULTS - VERIFIED                  ║");
-        Console.WriteLine("╚════════════════════════════════════════════════════════════╝");
-        Console.WriteLine();
-        Console.WriteLine($"Configuration:");
-        Console.WriteLine($"  Test Duration:        {durationSeconds}s (wall-clock time)");
-        Console.WriteLine($"  Batch Size:           {BATCH_SIZE} events per batch");
-        Console.WriteLine();
-        Console.WriteLine($"Measured Results:");
-        Console.WriteLine($"  Total Events Sent:    {eventCount:N0}");
-        Console.WriteLine($"  Actual Duration:      {totalElapsed.TotalSeconds:F2}s");
-        Console.WriteLine($"  Average Throughput:   {finalRate:F0} events/sec");
-        Console.WriteLine($"  Performance vs 20k:   {(finalRate / 20000) * 100:F1}% ✓");
-        Console.WriteLine();
-        Console.WriteLine($"Batch Latency Analysis (per publish batch):");
-        Console.WriteLine($"  P50 (median):         {p50}ms");
-        Console.WriteLine($"  P95 (95th %ile):      {p95}ms");
-        Console.WriteLine($"  P99 (99th %ile):      {p99}ms");
-        Console.WriteLine($"  Average:              {avg:F1}ms");
-        Console.WriteLine($"  Min/Max Range:        {min}ms - {max}ms");
-        Console.WriteLine();
-        Console.WriteLine("✓ Test Complete - All metrics verified");
-        Console.WriteLine();
+        if ((now - lastReportTime).TotalSeconds >= 1)
+        {
+            var intervalSecs = (now - lastReportTime).TotalSeconds;
+            var intervalEvents = eventCount - lastReportCount;
+            var intervalRate = intervalEvents / intervalSecs;
+            var totalSecs = (now - startTime).TotalSeconds;
+            var avgRate = eventCount / totalSecs;
+            Console.WriteLine($"[{elapsed:D2}/{durationSeconds}s] {eventCount:N0} events ({requestCount:N0} req) | Last 1s: {intervalRate:F0} evt/s | Avg: {avgRate:F0} evt/s | Errors: {errorCount}");
+            lastReportTime = now;
+            lastReportCount = eventCount;
+        }
     }
-    finally
-    {
-        await producerClient.CloseAsync();
-    }
+
+    // Drain in-flight
+    var sendWindowElapsed = DateTime.UtcNow - startTime;
+    List<Task> remaining;
+    lock (lockObj) { remaining = new List<Task>(pendingTasks); }
+    await Task.WhenAll(remaining);
+
+    var totalElapsed = DateTime.UtcNow - startTime;
+    var evtRate = eventCount / sendWindowElapsed.TotalSeconds;
+    var reqRate = requestCount / sendWindowElapsed.TotalSeconds;
+    var (p50, p95, p99, min, max, avg) = latencyTracker.GetStats();
+
+    Console.WriteLine();
+    Console.WriteLine("╔════════════════════════════════════════════════════════════╗");
+    Console.WriteLine("║             LOAD TEST RESULTS                             ║");
+    Console.WriteLine("╚════════════════════════════════════════════════════════════╝");
+    Console.WriteLine();
+    Console.WriteLine($"Configuration:");
+    Console.WriteLine($"  Target:               {apiUrl}");
+    Console.WriteLine($"  Duration:             {durationSeconds}s");
+    Console.WriteLine($"  Logs/request:         {logsPerRequest}");
+    Console.WriteLine($"  Concurrency:          {MAX_CONCURRENT_REQUESTS}");
+    Console.WriteLine($"  Test Run ID:          {testRunId}");
+    Console.WriteLine();
+    Console.WriteLine($"Throughput:");
+    Console.WriteLine($"  Total Events:         {eventCount:N0}");
+    Console.WriteLine($"  Total Requests:       {requestCount:N0}");
+    Console.WriteLine($"  Events/sec:           {evtRate:F0}");
+    Console.WriteLine($"  Requests/sec:         {reqRate:F0}");
+    Console.WriteLine($"  Errors:               {errorCount}");
+    Console.WriteLine();
+    Console.WriteLine($"HTTP Latency (per request):");
+    Console.WriteLine($"  P50:                  {p50}ms");
+    Console.WriteLine($"  P95:                  {p95}ms");
+    Console.WriteLine($"  P99:                  {p99}ms");
+    Console.WriteLine($"  Average:              {avg:F1}ms");
+    Console.WriteLine($"  Min/Max:              {min}ms - {max}ms");
+    Console.WriteLine();
+    Console.WriteLine("✓ Test Complete");
+    Console.WriteLine();
+    Console.WriteLine($"Run this SQL query after the consumer has drained all events:");
+    Console.WriteLine();
+    Console.WriteLine($"  SELECT COUNT(*) AS TotalEvents,");
+    Console.WriteLine($"    AVG(DATEDIFF_BIG(MILLISECOND, [Timestamp], CreatedAt)) AS AvgE2E_ms,");
+    Console.WriteLine($"    DATEDIFF_BIG(SECOND, MIN([Timestamp]), MAX(CreatedAt)) AS WallClockSeconds");
+    Console.WriteLine($"  FROM EventLogs WHERE Source = '{testRunId}';");
+    Console.WriteLine();
 }
 
 // Latency tracking for throughput measurement

@@ -3,8 +3,11 @@
 ## 1️⃣ Prerequisites
 
 ```powershell
-# Install Azure CLI (if not already installed)
+# Install Azure CLI
 # https://learn.microsoft.com/cli/azure/install-azure-cli
+
+# Install Azure Functions Core Tools v4
+npm install -g azure-functions-core-tools@4
 
 # Login to Azure
 az login
@@ -70,38 +73,69 @@ az deployment group show `
   --output json
 ```
 
-## 4️⃣ Configure Your App
+## 4️⃣ Configure Connection Strings
 
-Copy the generated configuration into your `appsettings.json`:
+The deployment script generates connection strings. Configure each component:
 
+**Producer** (`src/appsettings.json`):
 ```json
 {
   "EventHub": {
-    "FullyQualifiedNamespace": "eventhub-dev-xxx.servicebus.windows.net",
-    "EventHubName": "logs",
-    "ProducerConnectionString": "Endpoint=sb://eventhub-dev-xxx.servicebus.windows.net/;SharedAccessKeyName=SendPolicy;SharedAccessKey=...",
-    "ConsumerConnectionString": "Endpoint=sb://eventhub-dev-xxx.servicebus.windows.net/;SharedAccessKeyName=ListenPolicy;SharedAccessKey=...",
-    "BatchSize": 100,
-    "BatchTimeoutMs": 1000
-  },
-  "Storage": {
-    "ConnectionString": "DefaultEndpointsProtocol=https;AccountName=sablobcheckpointxxx;AccountKey=...;EndpointSuffix=core.windows.net",
-    "ContainerName": "checkpoints"
+    "FullyQualifiedNamespace": "your-namespace.servicebus.windows.net",
+    "HubName": "logs",
+    "ConnectionString": "Endpoint=sb://...;SharedAccessKeyName=SendPolicy;SharedAccessKey=...",
+    "UseKeyAuthentication": true
   }
 }
 ```
 
-## 5️⃣ Run Locally
+**Consumer** (`src-function/local.settings.json`):
+```json
+{
+  "Values": {
+    "AzureWebJobsStorage": "DefaultEndpointsProtocol=https;AccountName=...;AccountKey=...",
+    "CheckpointStoreConnection": "DefaultEndpointsProtocol=https;AccountName=...;AccountKey=...",
+    "EventHubConnection": "Endpoint=sb://...;SharedAccessKeyName=ListenPolicy;SharedAccessKey=...",
+    "EventHubName": "logs",
+    "EventHubConsumerGroup": "logs-consumer",
+    "SqlConnectionString": "Server=tcp:your-server.database.windows.net,1433;Database=your-db;Encrypt=True;TrustServerCertificate=False"
+  }
+}
+```
+
+## 5️⃣ Apply SQL Migration
 
 ```powershell
-# Go to project root
-cd ..
+# Run the idempotency migration (first time only)
+$token = (az account get-access-token --resource "https://database.windows.net/" --query accessToken -o tsv)
+# Execute infra/migrations/001_add_idempotency.sql against your SQL database
+```
 
-# Run producer/consumer
-dotnet run --configuration Release
+## 6️⃣ Run Consumer (Azure Functions)
 
-# Or with specific environment
-dotnet run --configuration Release --launch-profile Development
+```powershell
+cd src-function
+
+# Build and publish
+dotnet publish -c Release -o publish
+
+# Start the function
+cd publish
+$token = (az account get-access-token --resource "https://database.windows.net/" --query accessToken -o tsv)
+$env:SqlAccessToken = $token
+func start
+```
+
+## 7️⃣ Send Events (Producer Load Test)
+
+```powershell
+cd src
+
+# Quick test (~7,000 events)
+dotnet run -c Release -- --load-test=5
+
+# Sustained test
+dotnet run -c Release -- --load-test=30
 ```
 
 ## 6️⃣ Monitor
@@ -170,14 +204,15 @@ az eventhubs namespace delete `
 
 | Resource | Details |
 |---|---|
-| **Event Hub Namespace** | Standard SKU, 1 TU, allows 32 partitions |
-| **Event Hub (logs)** | 24 partitions, 1 day retention |
-| **Consumer Groups** | logs-consumer, monitoring-consumer, archive-consumer |
-| **Storage Account** | For checkpoint storage (blob storage) |
-| **Authorization Policies** | SendPolicy (producer), ListenPolicy (consumer) |
+| **Event Hub Namespace** | Standard SKU, auto-inflate enabled |
+| **Event Hub (logs)** | 24 partitions, 24h retention |
+| **Consumer Groups** | `logs-consumer` |
+| **Storage Account** | For checkpoint storage (blob) and function host |
+| **SQL Database** | With `EventLogs` table and idempotency index |
+| **Authorization Policies** | `SendPolicy` (producer), `ListenPolicy` (consumer) |
 
-**Total Cost:** ~$75-100/month
+**Estimated Cost:** ~$75-100/month
 
 ---
 
-For complete documentation, see `README.md` in the `deploy` folder.
+For complete documentation, see `README.md` and `DEPLOYMENT.md`.
