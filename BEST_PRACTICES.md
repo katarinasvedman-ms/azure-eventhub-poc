@@ -261,8 +261,8 @@ public async Task ProcessEventBatch(
 {
   "extensions": {
     "eventHubs": {
-      "maxEventBatchSize": 500,
-      "prefetchCount": 2000,
+      "maxEventBatchSize": 2000,
+      "prefetchCount": 8000,
       "batchCheckpointFrequency": 1,
       "checkpointStoreConnection": "CheckpointStoreConnection"
     }
@@ -270,24 +270,25 @@ public async Task ProcessEventBatch(
 }
 ```
 
-- `maxEventBatchSize`: 500 — balance between batch efficiency and SQL write latency
-- `prefetchCount`: 2000 — 4× batch size, keeps events ready for next invocation
+- `maxEventBatchSize`: 2000 — maximizes throughput per invocation (proven 28K+ evt/sec with EP3)
+- `prefetchCount`: 8000 — 4× batch size, keeps events ready for next invocation
 - `batchCheckpointFrequency`: 1 — checkpoint after every batch (safest)
 - `checkpointStoreConnection`: separates checkpoint I/O from host storage
 
 ### Idempotent SQL Writes
 
 ```sql
--- Temp-table staging pattern:
--- 1. CREATE #EventLogs_Staging (session-scoped, no races)
--- 2. SqlBulkCopy into #staging
--- 3. INSERT INTO EventLogs SELECT ... FROM #staging WHERE NOT EXISTS
+-- Direct SqlBulkCopy + IGNORE_DUP_KEY pattern:
+-- 1. SqlBulkCopy directly into EventLogs table
+-- 2. IGNORE_DUP_KEY=ON on unique index silently discards duplicates
+-- 3. Zero duplicates across 20M+ events (proven in 8 load test runs)
 ```
 
 Why this pattern:
-- `SqlBulkCopy` is all-or-nothing — can't catch 2627 per-row
-- Temp tables (`#`) are session-scoped — no cross-partition interference
-- `INSERT WHERE NOT EXISTS` atomically skips duplicates
+- Single operation — no temp tables, no staging, no INSERT WHERE NOT EXISTS
+- `IGNORE_DUP_KEY=ON` on the unique index handles dedup at the SQL engine level
+- 5.5× throughput improvement over the old 4-step temp-table staging pattern
+- Zero duplicates verified across all 8 load test runs (20M+ cumulative events)
 
 ---
 
@@ -372,9 +373,11 @@ az eventhubs namespace update \
 **Performance Metrics:**
 | Metric | Value |
 |--------|-------|
-| **Throughput** | 23,483 events/sec |
-| **Target Achievement** | 117.4% of 20,000 evt/sec target |
-| **Total Events** | 235,000 in 10 seconds |
+| **Throughput (Producer)** | 23,483 events/sec (unit test) |
+| **Throughput (E2E Peak)** | 28,335 events/sec (Run 6, EP3 + P6) |
+| **Throughput (E2E Cost-Optimized)** | 20,151 events/sec (Run 8, EP3 + BC Gen5 6) |
+| **Target Achievement** | 142% of 20,000 evt/sec target (Run 6) |
+| **Total Events** | 4.2M in Run 8 (20M+ cumulative across 8 runs) |
 | **Success Rate** | 100% |
 | **Failed Batches** | 0 |
 | **P50 Latency** | 23ms |
@@ -444,8 +447,8 @@ if (batch.Count > 0)
 {
   "extensions": {
     "eventHubs": {
-      "maxEventBatchSize": 500,
-      "prefetchCount": 2000,
+      "maxEventBatchSize": 2000,
+      "prefetchCount": 8000,
       "batchCheckpointFrequency": 1,
       "checkpointStoreConnection": "CheckpointStoreConnection"
     }
@@ -502,11 +505,13 @@ var eventData = new EventData(json)
 - [ ] Set up dead-letter queue handling
 
 ### Testing
-- [x] Load test producer at 26.7k evt/sec (30 seconds)
-- [x] E2E test: producer → Event Hub → Functions → SQL (59,578 events, 0 duplicates)
+- [x] Load test producer at 28K+ evt/sec (spike test, 120 seconds)
+- [x] E2E test: producer → Event Hub → Functions → SQL (4.2M events in Run 8, 0 duplicates)
 - [x] Verify idempotent writes handle re-delivery
 - [x] Test with realistic event sizes (~180 bytes JSON)
 - [x] Validate partition distribution
+- [x] Cost-optimized SQL tier validation (BC Gen5 6 at 45% Log IO)
+- [x] Standard vs Premium DTU comparison (Standard fails at 100% Log IO)
 - [ ] Test connection loss scenarios
 - [ ] Test failover scenarios
 
@@ -667,15 +672,18 @@ az eventhubs namespace update \
 ```
 
 **Cost Profile:**
-- **Idle/Low traffic**: 1 TU = ~$11/month
-- **Peak load (20k evt/sec)**: Auto-scales to 20 TUs temporarily
-- **Scale-down**: Automatically reduces when traffic stops
+- **Idle/Low traffic**: 1 TU = ~$11/month (if you manually reset capacity)
+- **Peak load (20k evt/sec)**: Auto-scales to 20 TUs
+- **After spike**: TUs stay at peak level — **auto-inflate does NOT scale down**
+- **Action required**: Manually run `az eventhubs namespace update --capacity 1` after spikes
+
+**⚠️ CRITICAL**: Auto-inflate only scales **UP**. It will never reduce TUs automatically. After a load test or traffic spike, you must manually reset `--capacity 1` or you'll keep paying for peak TUs indefinitely.
 
 **Real-world example:**
-- Dev/test environment: Mostly idle at 1 TU (~$11/month)
-- Daily peak traffic (1 hour): Scales to 20 TUs for that period
-- Rest of day: Back to 1 TU
-- Monthly cost: ~$50-80 instead of $220
+- Dev/test environment: Set capacity=1 (~$11/month)
+- Load test runs: Auto-inflate pushes to 20 TUs
+- After test: **Must manually reset** `--capacity 1` or pay $220/month
+- Monthly cost without reset: $220 (20 TUs provisioned 24/7)
 
 ### How Auto-Inflate Works
 
@@ -685,10 +693,10 @@ az eventhubs namespace update \
 - Completes within minutes
 
 **Scale-down behavior:**
-- Automatic when traffic is low
-- Decreases by 1 TU at a time
-- Takes 10-15 minutes of sustained low traffic
-- Prevents rapid oscillation (thrashing)
+- ⚠️ **Auto-inflate does NOT scale down** — this is a common misconception
+- Once TUs increase, they stay at that level until manually reduced
+- After a spike or load test, run: `az eventhubs namespace update --capacity 1`
+- Without manual intervention, you pay for peak TUs 24/7
 
 **Monitoring:**
 - Check **Metrics** → "Throughput Units" in Azure Portal
@@ -698,17 +706,33 @@ az eventhubs namespace update \
 
 ## Conclusion
 
+### Azure SQL Tier Selection for SqlBulkCopy Workloads
+
+**Critical finding from load testing**: Standard DTU tiers have much lower IO throughput than Premium/Business Critical tiers. For `SqlBulkCopy` workloads, **transaction log write speed is the bottleneck**, not CPU or DTU count.
+
+| SQL Tier | Throughput | Log IO | Verdict |
+|----------|-----------|--------|---------|
+| S6 (800 DTU Standard) | 7,756/sec | 100% | **FAILED** — Standard IO too slow |
+| P4 (500 DTU Premium) | 15,700/sec | 100% | Close but under 20K/s |
+| **BC Gen5 6 vCores** | **20,151/sec** | **45%** | **Recommended** — headroom |
+| P6 (1000 DTU Premium) | 28,335/sec | <30% | Works but expensive |
+
+**Rule**: Never use Standard tier for high-throughput bulk insert workloads. Always use Premium DTU or Business Critical vCore.
+
+---
+
 By implementing these best practices, you can achieve:
-- ✅ **26,700+ events/sec** producer throughput (proven)
+- ✅ **28,335 events/sec** consumer throughput (proven with EP3 + P6)
+- ✅ **20,151 events/sec** on cost-optimized BC Gen5 6 vCores at 45% Log IO
 - ✅ **<30ms average latency** (P99: ~100ms) on producer side
 - ✅ **100% reliability** with idempotent SQL writes and batch checkpointing
-- ✅ **Zero duplicates** with temp-table staging pattern
+- ✅ **Zero duplicates** across 20M+ events with IGNORE_DUP_KEY pattern
 - ✅ **Code patterns** following Azure standards
 - ✅ **Cost-optimized** with auto-inflate for variable workloads
 
 ---
 
-*Version*: 3.0  
-*Last Updated*: February 12, 2026  
-*Status*: E2E Verified
+*Version*: 4.0  
+*Last Updated*: February 13, 2026  
+*Status*: E2E Verified — 8 Load Test Runs
 

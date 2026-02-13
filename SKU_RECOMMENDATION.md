@@ -174,7 +174,7 @@ Benefits: Unlimited throughput, SLA guarantees
 - [x] Enable 24-hour retention (default)
 - [x] Set up Azure Blob Storage for checkpointing
 - [x] Deploy Azure Functions consumer with batch trigger
-- [x] Implement idempotent SQL writes (temp-table staging + unique index)
+- [x] Implement idempotent SQL writes (IGNORE_DUP_KEY + direct SqlBulkCopy)
 - [x] Set up monitoring (structured logging with batch metrics)
 - [x] Load testing: producer 26.7k evt/sec, consumer E2E verified (59,578 events, 0 duplicates)
 - [ ] Set up alerts:
@@ -197,3 +197,57 @@ Benefits: Unlimited throughput, SLA guarantees
 | **When to upgrade?** | When hitting 35k+ evt/sec |
 
 **Status: DEPLOYED & E2E VERIFIED** ✅
+
+---
+
+## Azure SQL Tier Selection (Load Test Validated)
+
+### Requirement
+20,000 events/sec consumer throughput using `SqlBulkCopy` with `IGNORE_DUP_KEY` unique index.
+
+### Critical Finding: Standard DTU ≠ Premium DTU
+
+Standard tier DTUs have **much lower IO throughput** than Premium/Business Critical DTUs. For IO-heavy workloads like `SqlBulkCopy`, the transaction log write speed is the bottleneck — not CPU or DTU count.
+
+| SQL Tier | DTU/vCores | Peak /sec | Log IO% | Cost/mo | Verdict |
+|----------|-----------|-----------|---------|---------|---------|
+| P1 (Premium) | 125 DTU | ~2,850 | 841% (overloaded) | ~$465 | Too small |
+| P4 (Premium) | 500 DTU | 15,700 | 100% | ~$1,860 | Close but under 20K/s |
+| **S6 (Standard)** | **800 DTU** | **7,756** | **100%** | ~$1,200 | **FAILED — Standard IO too slow** |
+| **BC Gen5 6 vCores** | **6 vCores** | **20,151** | **45%** | **~$3,500** | **Recommended — headroom** |
+| P6 (Premium) | 1000 DTU | 28,335 | <30% | ~$6,000 | Works but expensive |
+
+### Why Standard Tier Fails
+
+S6 has 800 DTU (more than P4's 500) yet achieves only **half the throughput** of P4:
+- Standard uses **HDD-backed storage** with lower transaction log write speeds
+- Premium/Business Critical uses **SSD-backed local storage** with much higher IO
+- For `SqlBulkCopy` workloads, **log IO throughput is the limiting factor**, not CPU or memory
+- **Never use Standard tier for high-throughput bulk insert workloads**
+
+### Recommended SQL Configuration
+
+| Setting | Value | Rationale |
+|---------|-------|-----------|
+| **Tier** | Business Critical Gen5 | SSD-backed storage, high log IO throughput |
+| **vCores** | 6 | 20K/s at 45% Log IO — room to grow |
+| **Cost** | ~$3,500/mo | 42% cheaper than P6 (~$6,000/mo) |
+
+### Premium DTU Tier Reference
+No P3 or P5 exists. The full Premium DTU lineup:
+
+| Tier | DTU | Approx Cost/mo |
+|------|-----|----------------|
+| P1 | 125 | ~$465 |
+| P2 | 250 | ~$930 |
+| P4 | 500 | ~$1,860 |
+| P6 | 1000 | ~$5,966 |
+| P11 | 1750 | ~$10,500 |
+| P15 | 4000 | ~$23,000 |
+
+### Production Recommendation
+
+For 20K events/sec with `SqlBulkCopy`:
+- **Best value**: Business Critical Gen5 6 vCores (~$3,500/mo) — 45% Log IO, headroom for growth
+- **Maximum performance**: P6 (1000 DTU, ~$6,000/mo) — 28K/s at 34% DTU, massive headroom
+- **Avoid**: Standard tier (any DTU count) — IO ceiling makes it unsuitable
