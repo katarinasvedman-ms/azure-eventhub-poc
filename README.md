@@ -2,11 +2,11 @@
 
 <br>
 
-<div align="center">
+<div>
 
 ```
          ┌──────────────────────────────────────────────────────┐
-         │               D E S I G N   P R I N C I P L E S     │
+         │               D E S I G N   P R I N C I P L E S      │
          └──────────────────────────────────────────────────────┘
 ```
 
@@ -27,32 +27,32 @@
 
 ## Overview
 
-Production-grade event ingestion pipeline handling **2,000–20,000 HTTP requests/sec** (1–10 log events each) with guaranteed idempotency. Clients send logs via REST API; the API buffers internally and publishes to Azure Event Hubs using SDK-managed batching. An Azure Functions consumer reads from Event Hubs in batches and writes to Azure SQL using idempotent bulk inserts.
+Event ingestion pipeline handling **2,000–20,000 HTTP requests/sec** (1–10 log events each) with guaranteed idempotency. Clients send logs via REST API; the API buffers internally and publishes to Azure Event Hubs using SDK-managed batching. An Azure Functions consumer reads from Event Hubs in batches and writes to Azure SQL using idempotent bulk inserts.
 
 ```
 Clients (HTTP)  →  REST API (src/)  →  Azure Event Hubs  →  Azure Functions (src-function/)  →  Azure SQL
-  1-10 logs/req     P1v3, autoscale    24 partitions, 8 TUs   EP1 Premium, batch 2000          Premium P1
-  2k-20k req/sec    1-5 instances      auto-inflate to 20     min 1, max 10 instances           125 DTU
+  1-10 logs/req     P1v3, autoscale    24 partitions, 20 TUs  EP3 Premium, batch 2000          BC Gen5 6
+  2k-20k req/sec    3-15 instances     auto-inflate to 30     max burst 20 instances            6 vCores
 ```
 
 ## Architecture at a Glance
 
 | Layer | Area | Configuration | Why it matters |
 |-------|------|---------------|----------------|
-| **REST API** | Hosting | Azure App Service **P1v3** (2 vCPU, 8 GB) | Handles HTTP ingestion with autoscale 1–5 instances |
+| **REST API** | Hosting | Azure App Service **P1v3** (2 vCPU, 8 GB) | Handles HTTP ingestion with autoscale 3–15 instances |
 | | Endpoints | `POST /api/logs/ingest` + `/ingest-batch` | Single and batch ingestion, returns 202 Accepted |
 | | Internal batching | `EventBatchingService` (500 events or 100ms flush) | Decouples HTTP request size from Event Hub batch size |
 | | Auth to Event Hub | **Managed Identity** (`DefaultAzureCredential`) | No connection strings — zero-secret deployment |
 | **Event Hub** | Partitions | **24 partitions** | Scale unit = partitions. ~1,000 events/sec per partition |
-| | Throughput Units | **8 TUs** with auto-inflate to **20** | 8 MB/s ingress, scales to 20 MB/s automatically |
+| | Throughput Units | **20 TUs** with auto-inflate to **30** | 20 MB/s ingress, scales to 30 MB/s automatically |
 | | Delivery model | At‑least‑once | Replays are expected on failure or rebalance |
-| **Azure Functions** | Hosting | **EP1 Premium** (min 1, max burst 10) | No cold start, stable under sustained load |
+| **Azure Functions** | Hosting | **EP3 Premium** (4 vCPU, 14 GB, max burst 20) | High throughput, stable under sustained load |
 | | Trigger type | `EventData[]` (batch) | One invocation processes many events |
-| | Batch size | `maxEventBatchSize: 2000`, `prefetchCount: 2000` | Maximizes throughput per invocation |
+| | Batch size | `maxEventBatchSize: 2000`, `prefetchCount: 8000` | Maximizes throughput per invocation |
 | | Checkpointing | Once per batch (`batchCheckpointFrequency: 1`) | ≤2,000 event replay window on crash |
-| **Database (SQL)** | SKU | **Premium P1** (125 DTU, SSD I/O, 500 GB) | 4,283 evt/sec sustained consumer writes |
-| | Correctness | `UNIQUE INDEX` on `EventId_Business` | Database is the final authority |
-| | Insert pattern | Temp-table staging + `INSERT WHERE NOT EXISTS` | Bulk-copy friendly, race-safe |
+| **Database (SQL)** | SKU | **Business Critical Gen5 6 vCores** | 20,151 evt/sec sustained at 45% Log IO |
+| | Correctness | `UNIQUE INDEX` on `EventId_Business` (IGNORE_DUP_KEY) | Database is the final authority |
+| | Insert pattern | SqlBulkCopy with IGNORE_DUP_KEY unique index | Bulk-copy friendly, race-safe |
 | **End‑to‑end** | Processing guarantee | At‑least‑once ingestion, effectively-once in DB | Unique index rejects duplicates |
 
 ## Performance Benchmarks
@@ -81,15 +81,18 @@ Clients (HTTP)  →  REST API (src/)  →  Azure Event Hubs  →  Azure Function
 ### Consumer Pipeline (E2E)
 | Metric | Value |
 |--------|-------|
-| Consumer throughput | **4,283 evt/sec** sustained |
+| Consumer throughput (peak) | **28,335 evt/sec** (EP3 + P6 1000 DTU, Run 6) |
+| Consumer throughput (cost-optimized) | **20,151 evt/sec** sustained (EP3 + BC Gen5 6, Run 8) |
 | Batch size | 2,000 events/invocation |
-| Duplicates | **0** across all test runs (1.3M+ events) |
-| Hosting | EP1 Premium + SQL Premium P1 |
+| Duplicates | **0** across all 8 load test runs (20M+ events) |
+| Hosting | EP3 Premium + SQL BC Gen5 6 vCores |
 
 ### Key Findings
 - **Zero errors** under distributed load test (Azure Load Testing)
-- **Zero duplicates** across 1.3M+ events — idempotency layer works
+- **Zero duplicates** across 20M+ events — idempotency layer works
+- **Standard DTU ≠ Premium DTU**: S6 (800 DTU Standard) achieved only 7K/s at 100% Log IO vs 20K/s on BC Gen5 6 at 45%
 - **Parallel SQL writes tested and reverted** — no benefit (DTU is the ceiling, not write concurrency)
+- **Function cold-start scaling** is the ramp-up bottleneck, not SQL (1→9 instances takes ~2 min)
 - **Critical**: Do NOT use explicit `MaximumSizeInBytes` in `CreateBatchOptions` (see `BATCH_OPTIONS_ANALYSIS.md`)
 
 ## Project Structure
@@ -236,11 +239,12 @@ Expected output:
 
 | Metric | Value |
 |--------|-------|
-| Consumer throughput | **4,283 evt/sec** sustained |
-| Consumer type | Azure Functions EP1 Premium |
+| Consumer throughput (peak) | **28,335 evt/sec** (EP3 + P6 1000 DTU) |
+| Consumer throughput (cost-optimized) | **20,151 evt/sec** sustained (EP3 + BC Gen5 6) |
+| Consumer type | Azure Functions EP3 Premium |
 | Batch size | 2,000 events/invocation |
-| SQL tier | Premium P1 (125 DTU) |
-| Total events verified | **1.3M+** across all test runs |
+| SQL tier (recommended) | Business Critical Gen5 6 vCores (45% Log IO at 20K/s) |
+| Total events verified | **20M+** across 8 load test runs |
 | Duplicates | **0** |
 
 ## API Endpoints
@@ -274,20 +278,19 @@ Expected output:
 
 ## Consumer Architecture
 
-The consumer is an **Azure Functions isolated worker** (EP1 Premium) with Event Hub batch trigger:
+The consumer is an **Azure Functions isolated worker** (EP3 Premium) with Event Hub batch trigger:
 
 1. Functions runtime delivers up to **2,000** events per invocation
 2. Deserialize each event, isolating poison messages
-3. `SqlBulkCopy` valid events into `#EventLogs_Staging` (session-scoped temp table)
-4. Deduplicate within the staging batch (`WITH Dupes AS (...) DELETE WHERE _rn > 1`)
-5. `INSERT INTO EventLogs SELECT ... FROM #staging WHERE NOT EXISTS` — atomic idempotent merge
-6. Functions runtime checkpoints AFTER successful return
+3. `SqlBulkCopy` valid events directly into `EventLogs` table
+4. IGNORE_DUP_KEY unique index on `EventId_Business` silently rejects duplicates
+5. Functions runtime checkpoints AFTER successful return
 
 **Key Design Decisions:**
-- **Temp table staging**: Each `SqlConnection` gets its own `#EventLogs_Staging` — no cross-partition races
-- **Intra-batch dedup**: Duplicate events within the same batch are removed before SQL insert
+- **IGNORE_DUP_KEY**: Direct SqlBulkCopy without staging tables — simpler, proven zero duplicates across 20M+ events
 - **Poison event isolation**: A single bad event doesn't kill the batch — it's logged and skipped
 - **Separated checkpoint store**: `checkpointStoreConnection` in host.json avoids I/O contention with host internals
+- **SQL tier matters**: Standard DTU tiers fail for bulk insert workloads (100% Log IO). Use Premium DTU or Business Critical vCore.
 
 ## CRITICAL: CreateBatchOptions Performance Issue
 
@@ -328,10 +331,10 @@ See `BATCH_OPTIONS_ANALYSIS.md` for detailed comparison and analysis.
 
 | Resource | Configuration | SKU |
 |----------|---------------|-----|
-| Web App (API) | `api-logsysng-eyeqfiorm5tv2` | **P1v3** (2 vCPU, 8 GB), autoscale 1–5 |
-| Event Hub | `eventhub-dev-eyeqfiorm5tv2` / `logs`, 24 partitions | Standard, **8 TUs** (auto-inflate → 20) |
-| Function App | `func-logsysng-premium-eyeqfiorm5tv2` | **EP1 Premium** (min 1, max burst 10) |
-| Azure SQL | `sqlserver-logsysng-eyeqfiorm5tv2` / `eventhub-logs-db` | **Premium P1** (125 DTU, SSD) |
+| Web App (API) | `api-logsysng-eyeqfiorm5tv2` | **P1v3** (2 vCPU, 8 GB), autoscale 3–15 |
+| Event Hub | `eventhub-dev-eyeqfiorm5tv2` / `logs`, 24 partitions | Standard, **20 TUs** (auto-inflate → 30) |
+| Function App | `func-logsysng-premium-eyeqfiorm5tv2` | **EP3 Premium** (4 vCPU, 14 GB, max burst 20) |
+| Azure SQL | `sqlserver-logsysng-eyeqfiorm5tv2` / `eventhub-logs-db` | **BC Gen5 6 vCores** (recommended) |
 | Storage | `sablobeyeqfiorm5tv2` (checkpoints) | Standard LRS |
 | Auth | Managed Identity everywhere | No connection strings to EH |
 | Region | Sweden Central | |
@@ -374,7 +377,7 @@ See `BATCH_OPTIONS_ANALYSIS.md` for detailed comparison and analysis.
 ---
 
 **Project**: Event Hub Pipeline  
-**Status**: E2E Verified — Azure Load Testing  
-**Version**: 4.0  
-**Performance**: API 2,790 req/sec (114ms P90) | Producer 50.7k evt/sec | Consumer 4,283 evt/sec | 0 duplicates  
-**Last Updated**: February 12, 2026
+**Status**: E2E Verified — 8 Load Test Runs  
+**Version**: 5.0  
+**Performance**: API 2,790 req/sec (114ms P90) | Producer 50.7k evt/sec | Consumer 28,335 evt/sec peak, 20,151 evt/sec cost-optimized | 0 duplicates  
+**Last Updated**: February 13, 2026
