@@ -10,7 +10,7 @@
          └──────────────────────────────────────────────────────┘
 ```
 
-<h2 style="border:none; margin:0; padding:0;"><b>The API</b> accepts any request size — the SDK batches internally.</h2>
+<h2 style="border:none; margin:0; padding:0;"><b>The API</b> accepts any request size — a background queue reshapes events into optimal Event Hub batches.</h2>
 <h2 style="border:none; margin:0; padding:0;"><b>Event Hubs</b> delivers at least once.</h2>
 <h2 style="border:none; margin:0; padding:0;"><b>Azure Functions</b> scale by partitions.</h2>
 <h2 style="border:none; margin:0; padding:0;"><b>SQL</b> enforces exactly-once results.</h2>
