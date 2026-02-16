@@ -16,3 +16,4 @@ GROUNDING.md
 .prompts/
 -
 load-test/api-load-test.jmx
+EVENTHUB_SDK_EXPLORATION.md

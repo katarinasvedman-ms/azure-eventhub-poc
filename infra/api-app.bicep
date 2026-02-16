@@ -91,9 +91,9 @@ resource autoscale 'Microsoft.Insights/autoscalesettings@2022-10-01' = {
       {
         name: 'CPU-based scaling'
         capacity: {
-          minimum: '1'
-          maximum: '5'
-          default: '1'
+          minimum: '3'
+          maximum: '15'
+          default: '3'
         }
         rules: [
           // Scale OUT when CPU > 70% for 5 minutes

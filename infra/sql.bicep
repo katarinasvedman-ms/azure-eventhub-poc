@@ -46,9 +46,10 @@ resource database 'Microsoft.Sql/servers/databases@2021-11-01' = {
   name: databaseName
   location: location
   sku: {
-    name: 'S2'
-    tier: 'Standard'
-    capacity: 50
+    name: 'BC_Gen5'
+    tier: 'BusinessCritical'
+    family: 'Gen5'
+    capacity: 6
   }
   properties: {
     collation: 'SQL_Latin1_General_CP1_CI_AS'

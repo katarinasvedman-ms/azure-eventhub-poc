@@ -18,8 +18,8 @@ resource eventHubNamespace 'Microsoft.EventHub/namespaces@2021-11-01' = {
     capacity: 1
   }
   properties: {
-    isAutoInflateEnabled: false
-    maximumThroughputUnits: 0
+    isAutoInflateEnabled: true
+    maximumThroughputUnits: 40
     kafkaEnabled: false
     zoneRedundant: false
   }
@@ -62,27 +62,8 @@ resource consumerGroupArchive 'Microsoft.EventHub/namespaces/eventhubs/consumerg
   }
 }
 
-// Shared Access Policy for Sender (Producer)
-resource sendAuthRule 'Microsoft.EventHub/namespaces/authorizationRules@2021-11-01' = {
-  parent: eventHubNamespace
-  name: 'SendPolicy'
-  properties: {
-    rights: [
-      'Send'
-    ]
-  }
-}
-
-// Shared Access Policy for Listener (Consumer)
-resource listenAuthRule 'Microsoft.EventHub/namespaces/authorizationRules@2021-11-01' = {
-  parent: eventHubNamespace
-  name: 'ListenPolicy'
-  properties: {
-    rights: [
-      'Listen'
-    ]
-  }
-}
+// Shared Access Policies removed — all services use managed identity.
+// If you need SAS keys for external consumers, add them back here.
 
 // Storage Account for Checkpointing
 resource storageAccount 'Microsoft.Storage/storageAccounts@2021-09-01' = {
@@ -112,7 +93,7 @@ resource blobContainer 'Microsoft.Storage/storageAccounts/blobServices/container
 param aadAdminLogin string
 param aadAdminSid string
 
-module sqlServer 'sql.bicep' = {
+module sqlServer '../infra/sql.bicep' = {
   name: 'sqlServer'
   params: {
     location: location
@@ -122,19 +103,20 @@ module sqlServer 'sql.bicep' = {
 }
 
 // ── Function App Module ──
-module functionApp 'function-app.bicep' = {
+module functionApp '../infra/function-app.bicep' = {
   name: 'functionApp'
   params: {
     location: location
     storageAccountName: storageAccount.name
-    eventHubListenConnectionString: listKeys(resourceId('Microsoft.EventHub/namespaces/authorizationRules', eventHubNamespace.name, 'ListenPolicy'), '2021-11-01').primaryConnectionString
+    eventHubNamespaceFqdn: '${eventHubNamespace.name}.servicebus.windows.net'
+    eventHubNamespaceId: eventHubNamespace.id
     sqlConnectionString: sqlServer.outputs.connectionString
     eventHubName: eventHubName
   }
 }
 
 // ── API Web App Module ──
-module apiApp 'api-app.bicep' = {
+module apiApp '../infra/api-app.bicep' = {
   name: 'apiApp'
   params: {
     location: location
@@ -151,9 +133,10 @@ output eventHubNamespaceId string = eventHubNamespace.id
 output eventHubId string = eventHub.id
 output partitionCount int = partitionCount
 output storageAccountName string = storageAccount.name
-output storageAccountConnectionString string = 'DefaultEndpointsProtocol=https;AccountName=${storageAccount.name};AccountKey=${listKeys(storageAccount.id, '2021-09-01').keys[0].value};EndpointSuffix=core.windows.net'
-output sendPolicyConnectionString string = listKeys(resourceId('Microsoft.EventHub/namespaces/authorizationRules', eventHubNamespace.name, 'SendPolicy'), '2021-11-01').primaryConnectionString
-output listenPolicyConnectionString string = listKeys(resourceId('Microsoft.EventHub/namespaces/authorizationRules', eventHubNamespace.name, 'ListenPolicy'), '2021-11-01').primaryConnectionString
+
+// Connection strings removed from outputs — secrets should not be exposed in deployment history.
+// They are passed internally to modules (function-app.bicep) via parameters.
+// Use `az storage account keys list` or `az eventhubs namespace authorization-rule keys list` if needed.
 output sqlServerName string = sqlServer.outputs.sqlServerName
 output sqlServerFqdn string = sqlServer.outputs.fullyQualifiedDomainName
 output sqlDatabaseName string = sqlServer.outputs.databaseName

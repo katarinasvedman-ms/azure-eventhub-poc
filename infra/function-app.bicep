@@ -1,8 +1,8 @@
 // ============================================================================
-// Function App — Flex Consumption plan with system-assigned managed identity
+// Function App — Elastic Premium (EP1) with system-assigned managed identity
 //
-// Flex Consumption (FC1) replaces Linux Consumption (Y1, EOL Sep 2028).
-// Benefits: faster cold start, per-function scaling, always-ready instances.
+// Elastic Premium provides dedicated compute with elastic scale-out,
+// VNET integration, and no cold-start penalty.
 //
 // Deployed as a module from main.bicep. Receives connection strings and
 // storage account name as parameters so nothing is hardcoded.
@@ -15,9 +15,10 @@
 param location string = resourceGroup().location
 param appName string = 'func-logsysng-${uniqueString(resourceGroup().id)}'
 
-// Connection strings passed from main.bicep
+// Resource references passed from main.bicep (no connection strings — uses managed identity)
 param storageAccountName string
-param eventHubListenConnectionString string
+param eventHubNamespaceFqdn string
+param eventHubNamespaceId string
 param sqlConnectionString string
 
 // Event Hub consumer settings
@@ -40,19 +41,20 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2023-01-01' existing 
   name: storageAccountName
 }
 
-var storageConnectionString = 'DefaultEndpointsProtocol=https;AccountName=${storageAccount.name};AccountKey=${storageAccount.listKeys().keys[0].value};EndpointSuffix=core.windows.net'
+// No storage connection string needed — using managed identity with AzureWebJobsStorage__accountName
 
-// ── Flex Consumption Plan (FC1) — replaces Linux Consumption (Y1, EOL Sep 2028) ──
-resource flexPlan 'Microsoft.Web/serverfarms@2023-12-01' = {
+// ── Elastic Premium Plan (EP1) — dedicated instances with elastic scale-out ──
+resource premiumPlan 'Microsoft.Web/serverfarms@2023-12-01' = {
   name: '${appName}-plan'
   location: location
-  kind: 'functionapp'
+  kind: 'elastic'
   sku: {
-    name: 'FC1'
-    tier: 'FlexConsumption'
+    name: 'EP2'
+    tier: 'ElasticPremium'
   }
   properties: {
     reserved: true // required for Linux
+    maximumElasticWorkerCount: 20
   }
 }
 
@@ -65,9 +67,10 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
     type: 'SystemAssigned'
   }
   properties: {
-    serverFarmId: flexPlan.id
+    serverFarmId: premiumPlan.id
     httpsOnly: true
     siteConfig: {
+      linuxFxVersion: 'DOTNET-ISOLATED|8.0'
       ftpsState: 'Disabled'
       minTlsVersion: '1.2'
       appSettings: [
@@ -80,19 +83,19 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
           name: 'FUNCTIONS_WORKER_RUNTIME'
           value: 'dotnet-isolated'
         }
-        // ── Storage (host + checkpoint store) ──
+        // ── Storage (managed identity — no account key) ──
         {
-          name: 'AzureWebJobsStorage'
-          value: storageConnectionString
+          name: 'AzureWebJobsStorage__accountName'
+          value: storageAccount.name
         }
         {
-          name: 'CheckpointStoreConnection'
-          value: storageConnectionString
+          name: 'CheckpointStoreConnection__blobServiceUri'
+          value: 'https://${storageAccount.name}.blob.${environment().suffixes.storage}'
         }
-        // ── Event Hub ──
+        // ── Event Hub (managed identity — no SAS key) ──
         {
-          name: 'EventHubConnection'
-          value: eventHubListenConnectionString
+          name: 'EventHubConnection__fullyQualifiedNamespace'
+          value: eventHubNamespaceFqdn
         }
         {
           name: 'EventHubName'
@@ -118,34 +121,56 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
         }
       ]
     }
-    functionAppConfig: {
-      deployment: {
-        storage: {
-          type: 'blobContainer'
-          value: '${storageAccount.properties.primaryEndpoints.blob}deployments'
-          authentication: {
-            type: 'StorageAccountConnectionString'
-            storageAccountConnectionStringName: 'AzureWebJobsStorage'
-          }
-        }
-      }
-      runtime: {
-        name: 'dotnet-isolated'
-        version: '8.0'
-      }
-      scaleAndConcurrency: {
-        maximumInstanceCount: 100
-        instanceMemoryMB: 2048
-      }
-    }
   }
 }
 
-// ── Blob container for Flex Consumption deployment storage ──
-resource deploymentContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-01-01' = {
-  name: '${storageAccount.name}/default/deployments'
+// ── Role Assignments for Managed Identity ──
+
+// Storage Blob Data Owner — required for AzureWebJobsStorage + checkpoint store
+var storageBlobDataOwnerRoleId = 'b7e6dc6d-f1e8-4753-8033-0f276bb0955b'
+resource storageBlobDataOwnerRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(storageAccount.id, functionApp.id, storageBlobDataOwnerRoleId)
+  scope: storageAccount
   properties: {
-    publicAccess: 'None'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', storageBlobDataOwnerRoleId)
+    principalId: functionApp.identity.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// Storage Queue Data Contributor — required for AzureWebJobsStorage internal queues
+var storageQueueDataContributorRoleId = '974c5e8b-45b9-4653-ba55-5f855dd0fb88'
+resource storageQueueDataContributorRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(storageAccount.id, functionApp.id, storageQueueDataContributorRoleId)
+  scope: storageAccount
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', storageQueueDataContributorRoleId)
+    principalId: functionApp.identity.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// Storage Table Data Contributor — required for AzureWebJobsStorage timer triggers
+var storageTableDataContributorRoleId = '0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3'
+resource storageTableDataContributorRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(storageAccount.id, functionApp.id, storageTableDataContributorRoleId)
+  scope: storageAccount
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', storageTableDataContributorRoleId)
+    principalId: functionApp.identity.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// Azure Event Hubs Data Receiver — required for Event Hub trigger
+var eventHubsDataReceiverRoleId = 'a638d3c7-ab3a-418d-83e6-5f17a39d4fde'
+resource eventHubReceiverRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(eventHubNamespaceId, functionApp.id, eventHubsDataReceiverRoleId)
+  scope: resourceGroup()
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', eventHubsDataReceiverRoleId)
+    principalId: functionApp.identity.principalId
+    principalType: 'ServicePrincipal'
   }
 }
 
